@@ -1,5 +1,4 @@
 import numpy as np
-import typing
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,7 +8,7 @@ from .port import PortPool
 
 #查找不同 state 中有效的 action
 class MatrixAnalyzer:
-	def __init__(self, matrix: list[np.matrix]):
+	def __init__(self, matrix: list[np.ndarray]):
 		"""
 		Initialize the analyzer with a matrix T.
 		Input:
