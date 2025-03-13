@@ -58,10 +58,11 @@ class ServiceGraph:
 		self.__total_cost = math.inf
 
 	def __repr__(self) -> str:
-		re = ''
-		for line in self.__lines_list:
-			re += str(line) + '\n'
-		return re
+		# re = ''
+		# for line in self.__lines_list:
+		# 	re += str(line) + '\n'
+		# return re
+		return ''.join(str(line) + '\n' for line in self.__lines_list)
 
 ################################################################################
 # Basic Attributes & Operations
