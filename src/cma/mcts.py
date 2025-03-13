@@ -5,12 +5,12 @@ Implementation of Monte Carlo Tree Search (MCTS) algorithm for CAM project
 """
 
 # from __future__ import annotations  # For Python < 3.11
-from typing import Optional, Self  # For Python 3.11+
+from typing import Optional  # For Python 3.11+
 import math
-import itertools
 import random
 import pickle
 
+from .vessel import VesselPool
 from .port import PortGraph
 from .servicegraph import ServiceGraph, GraphAction
 
@@ -23,15 +23,15 @@ class MonteCarloTreeSearchNode:
 
 	# ucb related
 	number_of_visits: int
-	sum_value: int
+	sum_value: float
 	prior_prob: float
 
 	# tree structure
 	borns: list[GraphAction]
-	children: list[Self]
-	parent: Self
+	children: list['MonteCarloTreeSearchNode']
+	parent: Optional['MonteCarloTreeSearchNode']
 
-	def __init__(self, service_graph: ServiceGraph, prior_prob: float, parent: Self):
+	def __init__(self, service_graph: ServiceGraph, prior_prob: float, parent: Optional['MonteCarloTreeSearchNode'] = None):
 		"""
 		`prior_prob` is taken from NN
 		"""
@@ -81,31 +81,32 @@ class MonteCarloTreeSearchNode:
 		return depth
 
 	def total_number_of_sub_nodes(self) -> int:
-		num = 1
-		the_node = self
-		for child in the_node.children:
-			num += child.total_number_of_sub_nodes()
-		return num
+		# num = 1
+		# the_node = self
+		# for child in the_node.children:
+		# 	num += child.total_number_of_sub_nodes()
+		# return num
+		return 1 + sum(child.total_number_of_sub_nodes() for child in self.children)
 
-	def best_sub_node(self, portgraph: PortGraph) -> Self:
+	def best_sub_node(self, portgraph: PortGraph) -> 'MonteCarloTreeSearchNode':
 		the_node = self
 		the_node_reward = the_node.current_state_reward()
 		for child in the_node.children:
 			if child.number_of_visits == 0:
 				continue
-			best_c_offspring: Self = child.best_sub_node(portgraph)
+			best_c_offspring: 'MonteCarloTreeSearchNode' = child.best_sub_node(portgraph)
 			if best_c_offspring.current_state_reward() > the_node_reward:
 				the_node = best_c_offspring
 				the_node_reward = the_node.current_state_reward()
 		return the_node
 
-	def best_sub_node_byucb(self, portgraph: PortGraph, c_param: float) -> Self:
+	def best_sub_node_byucb(self, portgraph: PortGraph, c_param: float) -> 'MonteCarloTreeSearchNode':
 		the_node = self
 		the_node_ucb_v = the_node.pucb(c_param)
 		for child in the_node.children:
 			if child.number_of_visits == 0:
 				continue
-			best_c_offspring: Self = child.best_sub_node_byucb(portgraph, c_param)
+			best_c_offspring: 'MonteCarloTreeSearchNode' = child.best_sub_node_byucb(portgraph, c_param)
 			if best_c_offspring.pucb(c_param) > the_node_ucb_v:
 				the_node = best_c_offspring
 				the_node_ucb_v = the_node.pucb(c_param)
@@ -122,7 +123,7 @@ class MonteCarloTreeSearchNode:
 	# 	return True
 
 	def add_child(self, graph_action: GraphAction,
-			portgraph: PortGraph, prior_prob: float, max_depth: int) -> Optional[Self]:
+			portgraph: PortGraph, prior_prob: float, max_depth: int) -> Optional['MonteCarloTreeSearchNode']:
 		"""
 		Input:
 			`graph_action`
@@ -157,7 +158,7 @@ class MonteCarloTreeSearchNode:
 # MCTS related
 ###############################################################################
 
-	def rollout(self, portgraph: PortGraph, discount_fac: float, valid_weight_proportion: float):
+	def rollout(self, portgraph: PortGraph, vesselpool: VesselPool, discount_fac: float, valid_weight_proportion: float):
 		"""
 		Input:
 			`discount_fac`
@@ -167,14 +168,14 @@ class MonteCarloTreeSearchNode:
 			2. Evaluate the value of `self` after several steps of adjustments
 		"""
 		# solve immediate value
-		self.graph.solve_approximated_cost(portgraph)
+		self.graph.solve_approximated_cost(portgraph, vesselpool)
 
 		# create a temporary root node whose parent is None
 		tmp_root = MonteCarloTreeSearchNode(self.graph, self.prior_prob, None)
 		the_node = tmp_root
 
 		total_weight = 1 / (1 - discount_fac)
-		sum_weight = 1
+		sum_weight = 1.0
 
 		while sum_weight < total_weight * valid_weight_proportion:
 			# Create a random `graph_action`
@@ -187,19 +188,21 @@ class MonteCarloTreeSearchNode:
 			the_action = all_actions[rand_idx]
 			the_prior = all_probs[rand_idx]
 			# Add `child_node` to `the_node`
-			child_node = the_node.add_child(the_action, portgraph, the_prior, float('inf'))
+			child_node = the_node.add_child(the_action, portgraph, the_prior, 999999)
+			assert child_node is not None
 			# child_node is not None since `max_depth = infty`
 
 			the_node = child_node
-			the_node.graph.solve_approximated_cost(portgraph)
+			the_node.graph.solve_approximated_cost(portgraph, vesselpool)
 			# Check stopping
 			sum_weight *= discount_fac
 			sum_weight += 1
 
-		sum_weight = 1
+		sum_weight = 1.0
 		value = the_node.current_state_reward()
-		while sum_weight < total_weight * valid_weight_proportion:
+		while sum_weight < total_weight * valid_weight_proportion and isinstance(the_node.parent, MonteCarloTreeSearchNode):
 			the_node = the_node.parent
+			# the_node is not None since `valid_weight_proportion` < 1
 			value *= discount_fac
 			value += the_node.current_state_reward()
 			sum_weight *= discount_fac
@@ -227,13 +230,13 @@ class MonteCarloTreeSearchNode:
 		# update NN
 		# use NN to update prob of each node
 
-	def expand(self, portgraph: PortGraph,
+	def expand(self, portgraph: PortGraph, vesselpool: VesselPool,
 			max_depth: int, c_param: float, discount_fac: float, valid_weight_proportion: float):
 		"""A more balanced way of expansion
 		"""
 		if self.get_depth() == max_depth:
 			print("到底了，多进行一次rollout！")
-			self.rollout(portgraph, discount_fac, valid_weight_proportion)
+			self.rollout(portgraph, vesselpool, discount_fac, valid_weight_proportion)
 			self.back_propagate(discount_fac)
 			return
 
@@ -243,11 +246,10 @@ class MonteCarloTreeSearchNode:
 		for idx, action in enumerate(actions):
 			if action not in self.borns:
 				pucb = c_param * probs[idx] * self.number_of_visits**0.5
-				pucb_list.append(pucb)
 			else: # in borns/children
 				c = self.children[self.borns.index(action)]
 				pucb = c.pucb(c_param)
-				pucb_list.append(pucb)
+			pucb_list.append(pucb)
 
 		selected_act_idx = pucb_list.index(max(pucb_list))
 		selected_act = actions[selected_act_idx]
@@ -257,35 +259,36 @@ class MonteCarloTreeSearchNode:
 		else:
 			print('在 expand 的时候找到已出生的孩子节点，递归进行 expand！')
 			c = self.children[self.borns.index(selected_act)]
-			c.expand(portgraph, max_depth, c_param, discount_fac, valid_weight_proportion)
+			c.expand(portgraph, vesselpool, max_depth, c_param, discount_fac, valid_weight_proportion)
 
-	def select(self, c_param: float) -> Self:
+	def select(self, c_param: float) -> 'MonteCarloTreeSearchNode':
 		"""
 		Return:
 			1. the selected leaf node
 			2. PUCB of that node
 		"""
-		if 0 == len(self.children):
+		if len(self.children) == 0:
 			return self
 		weights = [c.pucb(c_param) for c in self.children]
 		c = self.children[weights.index(max(weights))]
-		if c.pucb(c_param) > self.pucb(c_param):
-			return c.select(c_param)
-		else:
-			return self
+		return c.select(c_param) if c.pucb(c_param) > self.pucb(c_param) else self
+		# if c.pucb(c_param) > self.pucb(c_param):
+		# 	return c.select(c_param)
+		# else:
+		# 	return self
 
-	def search_step(self, portgraph: PortGraph, max_depth: int,
+	def search_step(self, portgraph: PortGraph, vesselpool: VesselPool, max_depth: int,
 		 	discount_fac: float, valid_weight_proportion: float, c_param: float = 1):
 		"""Using the more balanced way of expansion
 		"""
 		c = self.select(c_param)
 
 		if c.number_of_visits == 0:
-			c.rollout(portgraph, discount_fac, valid_weight_proportion)
+			c.rollout(portgraph, vesselpool, discount_fac, valid_weight_proportion)
 			c.back_propagate(discount_fac)
 			print("call rollout")
 		else:
-			c.expand(portgraph, max_depth, c_param, discount_fac, valid_weight_proportion)
+			c.expand(portgraph, vesselpool, max_depth, c_param, discount_fac, valid_weight_proportion)
 			print("call expand")
 
 
@@ -304,7 +307,7 @@ class MonteCarloTreeSearchNode:
 
 	def pucb(self, c_param: float) -> float:
 		if self.number_of_visits == 0:  # newly expanded, but not rollout yet
-			q_value = 0
+			q_value = 0.0
 		else:
 			q_value = self.sum_value / self.number_of_visits
 		if self.parent is None:
@@ -323,6 +326,7 @@ class MonteCarloTree:
 	"""
 	root_node: MonteCarloTreeSearchNode
 	portgraph: PortGraph
+	vesselpool: VesselPool
 
 	discount_fac: float  # discount factor `beta`
 	c_param: float
@@ -330,6 +334,7 @@ class MonteCarloTree:
 
 	def __init__(self, service_graph: ServiceGraph,
 			portgraph: PortGraph,
+			vesselpool: VesselPool,
 			discount_fac:float=0.5,
 			max_depth: int=5,
 			c_param:float=0.0005):
@@ -339,6 +344,7 @@ class MonteCarloTree:
 		'''
 		self.root_node = MonteCarloTreeSearchNode(service_graph, 1, None)
 		self.portgraph = portgraph
+		self.vesselpool = vesselpool
 
 		self.discount_fac = discount_fac
 		self.c_param = c_param
@@ -348,6 +354,7 @@ class MonteCarloTree:
 		for _ in range(epochs):
 			self.root_node.search_step(
 				self.portgraph,
+				self.vesselpool,
 				self.max_depth,
 				self.discount_fac,
 				valid_weight_proportion=0.9
@@ -366,20 +373,20 @@ class MonteCarloTree:
 	def best_node_byucb(self) -> MonteCarloTreeSearchNode:
 		return self.root_node.best_sub_node_byucb(self.portgraph, self.c_param)
 
-	def is_fully_expand(self):
-		return self.root_node.is_fully_expand(self.portgraph, self.max_depth)
+	# def is_fully_expand(self):
+	# 	return self.root_node.is_fully_expand(self.portgraph, self.max_depth)
 
 ###############################################################################
 # Utils
 ###############################################################################
 
-	def save_tree(self, file: str = None) -> None:
+	def save_tree(self, file: Optional[str] = None) -> None:
 		if file is not None:
 			with open(file, 'wb') as f:
 				pickle.dump(self, f)
 
 	@staticmethod
-	def load_tree(file: str = None) -> Optional[Self]:
+	def load_tree(file: Optional[str] = None) -> Optional['MonteCarloTree']:
 		if file is not None:
 			with open(file, 'rb') as f:
 				return pickle.load(f)
