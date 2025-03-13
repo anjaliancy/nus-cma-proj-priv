@@ -11,7 +11,7 @@ import math
 import cvxpy as cp
 import numpy as np
 
-from .vessel import Vessel, VesselPool
+from .vessel import VesselPool
 from .port import Port, PortGraph
 from .serviceline import ServiceLine, LineAction, Path, Slot, Segment
 
@@ -39,13 +39,14 @@ class GraphAction:
 		return LineAction(self.cmd, self.loc)
 
 	def __eq__(self, other) -> bool:
-		if self.line != other.line:
-			return False
-		if self.cmd != other.cmd:
-			return False
-		if self.loc != other.loc:
-			return False
-		return True
+		# if self.line != other.line:
+		# 	return False
+		# if self.cmd != other.cmd:
+		# 	return False
+		# if self.loc != other.loc:
+		# 	return False
+		# return True
+		return self.line == other.line and self.cmd == other.cmd and self.loc == other.loc
 
 class ServiceGraph:
 	"""The graph of the service system
@@ -89,10 +90,9 @@ class ServiceGraph:
 				seg_union.add(slot.get_segment())
 		return list(seg_union), all_service_slots
 
-	def get_adjacency_matrices(self, portgraph: PortGraph) -> list[np.matrix]:
-		returned_adjs = []
-		for line in self.__lines_list:
-			returned_adjs.append(line.get_adjacency_matrix(portgraph))
+	def get_adjacency_matrices(self, portgraph: PortGraph) -> list[np.ndarray]:
+		returned_adjs: list[np.ndarray] = []
+		returned_adjs.extend(line.get_adjacency_matrix(portgraph) for line in self.__lines_list)
 		return returned_adjs
 
 
@@ -107,8 +107,7 @@ class ServiceGraph:
 
 		new_services: list[ServiceLine] = self.__lines_list.copy()
 		new_services[graph_action.line] = new_line
-		new_graph = ServiceGraph(new_services)
-		return new_graph
+		return ServiceGraph(new_services)
 
 	def get_feasible_actions(self, portgraph: PortGraph):
 		analyzer = MatrixAnalyzer(self.get_adjacency_matrices(portgraph))
@@ -148,7 +147,7 @@ class ServiceGraph:
 					continue
 				# case 2:
 				hubs = list(set(line_o.tolist_port()) & set(line_d.tolist_port()))
-				if len(hubs) == 0:
+				if not hubs:  # len(hubs) == 0
 					continue
 				for hub in hubs:
 					if hub not in trans_ports:
@@ -166,7 +165,7 @@ class ServiceGraph:
 	def get_all_paths(self, portgraph: PortGraph,
 		trans_port_draft_req=0, trans_cost_req=75) \
 		-> tuple[
-			list[tuple[int, int]], list[list[Path]], list[tuple[int]]
+			list[tuple[int, int]], list[list[Path]], list[tuple[int, int]]
 		]:
 		"""Searching all connected paths among all ports in the network
 
@@ -183,8 +182,8 @@ class ServiceGraph:
 		trans_ports = list(set(trans_ports_1) & set(trans_ports_2))
 		od_pairs: list[tuple[int, int]] = portgraph.get_all_od_pairs()
 		paths: list[list[Path]] = []
-		connected = []
-		unconnected = []
+		connected: list[tuple[int, int]] = []
+		unconnected: list[tuple[int, int]] = []
 
 		for pair in od_pairs:
 			port_o = portgraph.get_port_by_idx(pair[0])
@@ -235,7 +234,7 @@ class ServiceGraph:
 				flow_vars.append(y_Ts)
 			return flow_vars
 
-		def create_capacities() -> tuple[list[list[cp.Variable]], list[cp.Expression]]:
+		def create_capacities() -> tuple[list[list[cp.Variable]], list[float | cp.Expression]]:
 			"""Create
 				V_{T,s} is a matrix of (lines, 13)
 				C_{T} is a vector of lines
@@ -244,9 +243,9 @@ class ServiceGraph:
 			capacities = []
 			for line in self.__lines_list:
 				ships_line = []
-				line_capacity = 0
+				line_capacity: float | cp.Expression = 0.0
 				for ship in vesselpool.vessels_list:
-					ship_var = cp.Variable(name=f'V_({line.name(), ship.vessel_rank})')
+					ship_var = cp.Variable(name=f'V_({line.name(), ship.vessel_rank})', integer=True)  # ship number is integer
 					ships_line.append(ship_var)
 					line_capacity += ship.vessel_capacity * ship_var
 				capacities.append(line_capacity)
@@ -304,12 +303,13 @@ class ServiceGraph:
 
 		# Statistics
 		#
-		def add_ele_to_counts_dict(dict_key, dict_val, counts_dict: dict):
+		def add_ele_to_counts_dict(dict_key: str, dict_val: int | cp.Expression, counts_dict: dict):
 			if dict_key not in counts_dict:
 				counts_dict[dict_key] = dict_val
 			else:
 				counts_dict[dict_key] += dict_val
-		seg_demand_flows = {}
+
+		seg_demand_flows: dict[str, cp.Expression] = {}
 		#
 		# a matrix with rows representing for lines and columns for ports
 		transship_statistics = np.array([
@@ -386,7 +386,7 @@ class ServiceGraph:
 		# Constraint: Slot Flow sum_T Y_{T, i, j} >= Slot Demand Flow sum_{p has (i,j)} X_{o, d, p}
 		#
 		# 1. statistics of segment flows
-		seg_flow = {}
+		seg_flow: dict[str, cp.Expression] = {}
 		for y_T, line in zip(flow_vars, self.__lines_list):
 			for idx, slot in enumerate(line.tolist_slot()):
 				seg = slot.get_segment()
@@ -415,9 +415,9 @@ class ServiceGraph:
 		# Constraint: Max Daily Port Call Limits
 		#
 		# 1. statistics of port calls
-		port_call_counts = {}
+		port_call_counts: dict[str, cp.Expression] = {}
 		for line_idx, line in enumerate(self.__lines_list):
-			line_ship_number = 0
+			line_ship_number: int | cp.Expression = 0
 			line_ships = ship_vars[line_idx]
 			for ship in line_ships:
 				line_ship_number += ship
@@ -482,7 +482,8 @@ class ServiceGraph:
 		# problem
 		prob = cp.Problem(cp.Minimize(obj_expr), constraints)
 		# solve
-		prob.solve(solver=cp.GLPK, verbose=True)
+		prob.solve() 
+		#prob.solve(solver=cp.GLPK, verbose=True)
 
 		self.__total_cost = typing.cast(float, prob.value)
 		if display:
