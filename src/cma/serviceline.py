@@ -11,7 +11,8 @@ import geopandas as gpd
 from collections import Counter
 from matplotlib import pyplot as plt
 from shapely.geometry import LineString, Point
-from scgraph.geographs.marnet import marnet_geograph
+from scgraph.geographs.marnet import marnet_geograph  # type: ignore
+## Note: the typing of this function is not correct
 
 from .port import Port, PortPool, PortGraph
 
@@ -178,6 +179,7 @@ class Path:
 		minx, miny, maxx, maxy = gdf_ports.geometry.total_bounds
 		# hubs
 		hubs = self.get_hubs()
+		gdf_hubs = None
 		if len(hubs) > 0:
 			hub_locs = [Point(port.get_location()) for port in hubs]
 			hub_ids = [port.get_id() for port in hubs]
@@ -196,8 +198,8 @@ class Path:
 			loc_1 = p1.get_location()
 			loc_2 = p2.get_location()
 			output = marnet_geograph.get_shortest_path(
-				origin_node={"longitude": loc_1[0],"latitude": loc_1[1]},
-				destination_node={"longitude": loc_2[0],"latitude": loc_2[1]}
+				origin_node={"longitude": loc_1[0],"latitude": loc_1[1]},      # type: ignore
+				destination_node={"longitude": loc_2[0],"latitude": loc_2[1]}  # type: ignore
 			)
 			cords_path = output['coordinate_path']
 			path = LineString([(cord[1], cord[0]) for cord in cords_path])
@@ -206,8 +208,7 @@ class Path:
 			gdf_path.plot(ax=ax, linewidth=2, label=label)
 
 		# plot ports
-		gdf_ports.plot(ax=ax, color='black', markersize = 15)
-		if len(hubs) > 0:
+		if gdf_hubs is not None:
 			gdf_hubs.plot(ax=ax, color='red', markersize = 20)
 		for x, y, idx in zip(gdf_ports.geometry.x, gdf_ports.geometry.y, port_idxs):
 			ax.text(x, y, str(idx), fontsize=10, va='bottom')
@@ -416,8 +417,8 @@ class ServiceLine:
 			loc_1 = p1.get_location()
 			loc_2 = p2.get_location()
 			output = marnet_geograph.get_shortest_path(
-				origin_node={"longitude": loc_1[0],"latitude": loc_1[1]},
-				destination_node={"longitude": loc_2[0],"latitude": loc_2[1]}
+				origin_node={"longitude": loc_1[0],"latitude": loc_1[1]},      # type: ignore
+				destination_node={"longitude": loc_2[0],"latitude": loc_2[1]}  # type: ignore
 			)
 			cords_path = output['coordinate_path']
 			path = LineString([(cord[1], cord[0]) for cord in cords_path])
@@ -551,7 +552,7 @@ class ServiceLine:
 			raise ValueError(f'Port "{start.get_id()}" not in Service')
 		if not self.has_port(end):
 			raise ValueError(f'Port "{end.get_id()}" not in Service')
-		the_slots: list[Slot] = None
+		the_slots: list[Slot] = []
 		the_slots_length: int = self.number_of_port()
 		start_indexes = self.all_index_of_port(start)
 		end_indexes = self.all_index_of_port(end)
