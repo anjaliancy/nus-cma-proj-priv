@@ -39,10 +39,11 @@ class Port:
 	cost_call: list[float]
 	cost_transship: float
 	cost_storage: float
+	transshipment_capacity: bool
 
 	def __init__(self, port_id: str, name: str, longitude: float, latitude: float,
 					fit_vessel_ranks: dict[int, float], cost_call: list[float], berth_productivity: list[float],
-					cost_transship: float, cost_storage: float,
+					cost_transship: float, cost_storage: float, transshipment_capacity: bool,
 					max_draft: float, max_daily_call: int, number_of_visit: int):
 		self.__id = port_id
 		self.__name = name
@@ -56,6 +57,7 @@ class Port:
 		self.cost_call = cost_call
 		self.cost_transship = cost_transship
 		self.cost_storage = cost_storage
+		self.transshipment_capacity = transshipment_capacity
 
 	def __repr__(self) -> str:
 		return self.__id
@@ -72,7 +74,10 @@ class Port:
 	def get_max_number_of_visit(self) -> int:
 		return self.__n_visit
 
-	def get_producticity_for_each_vessel_type(self, vesselpool: VesselPool) -> list[float]:
+	def get_producticity(self, vesselpool: VesselPool) -> list[float]:
+		"""
+		Productivity for each vessel type
+		"""
 		re = []
 		for vessel in vesselpool.vessels_list:
 			if vessel.vessel_rank in self.fit_vessel_ranks:
@@ -82,6 +87,11 @@ class Port:
 		return re
 
 	def get_port_call_costs(self, vesselpool: VesselPool) -> list[float]:
+		"""
+		Input: all vessels
+
+		Return: a list of port call cost of each vessel
+		"""
 		n_vessel_types = vesselpool.get_number_of_types()
 		pc_costs = [float('inf') for _ in range(n_vessel_types)]
 		for vclass, pc_cost in self.fit_vessel_ranks.items():
@@ -198,7 +208,7 @@ class PortPool:
 
 	def add_port(self, port_id: str, name: str, longitude: float, latitude: float,
 					fit_vessel_ranks: dict, cost_call: list[float], berth_productivity: list[float],
-					cost_transship: float, cost_storage: float,
+					cost_transship: float, cost_storage: float, transshipment_capacity: bool,
 					max_draft: float, max_daily_call: int, number_of_visit: int):
 		if self.has_port_by_id(port_id):
 			return
@@ -206,7 +216,7 @@ class PortPool:
 			Port(
 				port_id, name, longitude, latitude,
 				fit_vessel_ranks, cost_call, berth_productivity,
-				cost_transship, cost_storage,
+				cost_transship, cost_storage, transshipment_capacity,
 				max_draft, max_daily_call, number_of_visit
 			)
 		)
@@ -235,6 +245,15 @@ class PortPool:
 		re = []
 		for port in self.__port_list:
 			if port.cost_transship < cost:
+				re.append(port)
+		return re
+
+	def filtered_by_transship_capacity(self) -> list[Port]:
+		"""Find all ports who can transship
+		"""
+		re = []
+		for port in self.__port_list:
+			if port.transshipment_capacity == True:
 				re.append(port)
 		return re
 

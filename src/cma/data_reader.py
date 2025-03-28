@@ -72,6 +72,7 @@ def read_port_data() -> Tuple[PortPool, PortPool]:
 			[],  # berth productivity
 			transshipment_cost,
 			storage_cost,
+			row['Transhipment Capacity'],
 			row['Max Draft'],
 			row['Max Daily Port Call'],
 			2,  # max number of visit in a line

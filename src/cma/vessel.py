@@ -5,6 +5,7 @@ Define all vessel related classes and methods
 """
 
 import pandas as pd
+import numpy as np
 from typing import Tuple
 
 ################################################################################
@@ -21,17 +22,24 @@ class Vessel:
 	vessel_capacity: float
 	vessel_draft: float
 	daily_chartering_cost: float
-	bunkering_cost_coefs: list[dict]
+	bunkering_cost_coefs: pd.DataFrame
 	unit_bunkering_cost: float
 
-	def __init__(self, v_rank, v_class, capacity, draft,
-				daily_chartering_cost, bunkering_cost_coefs, unit_bunkering_cost):
+	def __init__(self,
+			v_rank: int,               # from 1 to 13
+			v_class: Tuple[int, int],  # `100 - 499`
+			capacity,
+			draft,
+			daily_chartering_cost,
+			bunkering_cost_coefs,
+			unit_bunkering_cost
+	):
 		self.vessel_rank = v_rank
 		self.vessel_class = v_class
 		self.vessel_capacity = capacity
 		self.vessel_draft = draft
 		self.daily_chartering_cost = daily_chartering_cost
-		self.bunkering_cost_coefs = bunkering_cost_coefs
+		self.bunkering_cost_coefs = pd.DataFrame(bunkering_cost_coefs)
 		self.unit_bunkering_cost = unit_bunkering_cost
 
 	def __repr__(self) -> str:
@@ -58,15 +66,34 @@ class VesselPool:
 			'Vessel Number' : self.numbers_list
 		})
 
+	def get_bukering_costs(self) -> tuple[np.ndarray, int]:
+		"""
+		A list of bukering costs of all speed for each vessel class
+		"""
+		n_vessel_ranks = len(self.vessels_list)
+		n_speed_levels = len(self.vessels_list[0].bunkering_cost_coefs)
+		base_speed_level = self.vessels_list[0].bunkering_cost_coefs.at[0, 'speed']
+		consumption = np.ones(shape=(n_vessel_ranks, n_speed_levels))
+		for vessel in self.vessels_list:
+			df = vessel.bunkering_cost_coefs
+			consumption[vessel.vessel_rank - 1, :] = df['consumption'] * vessel.unit_bunkering_cost
+		return consumption, base_speed_level
+
 	def get_bukering_cost_middle(self) -> list[float]:
+		"""
+		A list of bukering cost for each vessel class at the middle speed
+		"""
 		re = []
 		for vessel in self.vessels_list:
-			cost_coef = vessel.bunkering_cost_coefs[5]['consumption']
-			cost = cost_coef * vessel.unit_bunkering_cost
+			df = vessel.bunkering_cost_coefs
+			cost = df.at[6, 'consumption'] * vessel.unit_bunkering_cost
 			re.append(cost)
 		return re
 
 	def get_chartering_costs(self) -> list[float]:
+		"""
+		Return: a list of daily chartering cost for each vessel class
+		"""
 		c_costs = []
 		for vessel in self.vessels_list:
 			c_costs.append(vessel.daily_chartering_cost)
