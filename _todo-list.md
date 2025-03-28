@@ -4,19 +4,19 @@
 
 ## 1. Tasks
 
-- [ ] Layer 0. Given lines, calculate minimized cost. Focusing on cargo allocation problem and everything are on average. 
+- [ ] Layer 0. Given lines, calculate minimized cost. Focusing on cargo allocation problem and everything are on average.
 
-    - [x] Basic framework. 
+    - [x] Basic framework.
 
-    - [x] Only consider average demand rate per week. 
-    - [x] Only consider line level capacity, not the vessels. 
-    - [ ] Considering number of vessesl as integer variables into MIP. 
-    - [ ] Consider more realistic type of demands. 
+    - [x] Only consider average demand rate per week.
+    - [x] Only consider line level capacity, not the vessels.
+    - [x] Considering number of vessesl as integer variables into MIP.
+    - [ ] Consider more realistic type of demands.
     - [ ] Estimate average port call cost and transshipment cost per week.
-    - [ ] Estimate average bunkering cost per week
-    - [ ] Estimate average chartering cost per week
+    - [x] Estimate average bunkering cost per week
+    - [x] Estimate average chartering cost per week
 
-- [ ] Layer 1 MCTS propotype 
+- [ ] Layer 1 MCTS propotype
 
     - [x] Basic framework
     - [x] Expand the tree slower (**Linsheng**)
@@ -29,7 +29,7 @@
 - [ ] Layer 1 MCTS with neural network
 
     - [ ] A basic framework
-    - [ ] Using GNN to learn graph information, methedology (**Xuefei**) 
+    - [ ] Using GNN to learn graph information, methedology (**Xuefei**)
     - [ ] Large network
 
 - [ ] Layer 2 finer version
@@ -42,9 +42,9 @@
 
 ## 2. Problems
 
-Currently, we are building the basic framework of layer 1 (MCTS with neural network). Below are the problems that we have to solve: 
+Currently, we are building the basic framework of layer 1 (MCTS with neural network). Below are the problems that we have to solve:
 
-- [ ] The representation of directed network as neural network input. 
+- [ ] The representation of directed network as neural network input.
 - [ ] How to extract network information? By GNN?
-- [ ] 
+- [ ]
 
