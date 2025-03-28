@@ -50,6 +50,11 @@ def read_vessel_class_data() -> VesselPool:
 	return VesselPool(vessels_list, numbers_list)
 
 def read_port_data() -> Tuple[PortPool, PortPool]:
+	"""
+	return:
+	- A larger pool of ports with some data not complete
+	- Pool of ports whose data are more compete
+	"""
 	port_pool = PortPool()
 	port_pool_list_complete_info = []
 	# 1. port data
@@ -177,6 +182,9 @@ def read_demand_data(portpool: PortPool) -> tuple[dict, np.matrix]:
 
 def read_current_line_data(portpool: PortPool, display = False) -> tuple[list[ServiceLine], list[int]]:
 	"""input `portpool` as a filter
+	return:
+	- current lines
+	- weeks
 	"""
 	current_lines = []
 	current_lines_weeks = []
