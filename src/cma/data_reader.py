@@ -131,7 +131,7 @@ def read_sailing_distance_data(portpool: PortPool) -> np.matrix:
 	}
 	dist_matrix = np.ones((len(port_mapping), len(port_mapping))) * float('inf')
 	file = resources.files('cma.res').joinpath(data_file_sail_distance)
-	df = pd.read_csv(str(file))  # read first table
+	df = pd.read_csv(str(file), low_memory=False)  # read first table
 	df = df.rename(columns=lambda x: x.strip())  # trim titles
 
 	for _, row in df.iterrows():
