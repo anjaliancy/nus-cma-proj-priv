@@ -8,13 +8,13 @@ Define all service graph related classes and methods
 import typing
 import time
 import math
+import bisect
 import cvxpy as cp
 import numpy as np
 
 from .vessel import VesselPool
 from .port import Port, PortGraph
 from .serviceline import ServiceLine, LineAction, Path, Slot, Segment
-
 from .rl_utils import MatrixAnalyzer
 
 
@@ -65,10 +65,8 @@ class ServiceGraph:
 		# return re
 		return ''.join(str(line) + '\n' for line in self.__lines_list)
 
-################################################################################
-# Basic Attributes & Operations
-################################################################################
-
+# region - Basic Attributes & Operations ########################################
+#
 	def total_cost(self) -> float:
 		return self.__total_cost
 
@@ -94,12 +92,11 @@ class ServiceGraph:
 		returned_adjs: list[np.ndarray] = []
 		returned_adjs.extend(line.get_adjacency_matrix(portgraph) for line in self.__lines_list)
 		return returned_adjs
+#
+# endregion
 
-
-################################################################################
-# Action related
-################################################################################
-
+# region - Actions related #######################################################
+#
 	def update_by_graph_action(self, graph_action: GraphAction, portgraph: PortGraph) -> 'ServiceGraph':
 		old_line = self.__lines_list[graph_action.line]
 		line_action = graph_action.get_line_action(old_line, portgraph)
@@ -119,12 +116,11 @@ class ServiceGraph:
 			for action in actions
 		]
 		return actions_dict, actions_list
+#
+# endregion
 
-
-################################################################################
-# Path related
-################################################################################
-
+# region - Path related #########################################################
+#
 	def get_all_lines_contains(self, ports: list[Port]) -> list[ServiceLine]:
 		re = set()
 		for line in self.__lines_list:
@@ -162,172 +158,278 @@ class ServiceGraph:
 						paths_list.append(Path(path_1 + path_2))
 		return paths_list
 
-	def get_all_paths(self, portgraph: PortGraph,
-		trans_port_draft_req=0, trans_cost_req=75) \
-		-> tuple[
-			list[tuple[int, int]], list[list[Path]], list[tuple[int, int]]
-		]:
+	def get_all_paths(self, portgraph: PortGraph, trans_ports: list[Port]) -> dict[str, list]:
 		"""Searching all connected paths among all ports in the network
 
 		input:
-			`trans_port_draft_req`: required draft for transshipment
+			`trans_ports`: hubs for transshipment
 
 		return:
 			`od_pairs`: list of port-index pairs (ports are 0 indexed)
-			`paths`
-			`unconnected`
+			`od_pairs_path`: for each OD pair, there is a list of path
+			`od_pairs_demand`: list of demand between OD pairs (sorted from large to small)
+			`unconnected`: all unconnected OD pairs
 		"""
-		trans_ports_1 = portgraph.filter_by_max_draft(trans_port_draft_req)
-		trans_ports_2 = portgraph.filtered_by_transship_cost(trans_cost_req)
-		trans_ports = list(set(trans_ports_1) & set(trans_ports_2))
 		od_pairs: list[tuple[int, int]] = portgraph.get_all_od_pairs()
 		paths: list[list[Path]] = []
 		connected: list[tuple[int, int]] = []
 		unconnected: list[tuple[int, int]] = []
+		unconnected_demand: list[float] = []
+		od_pairs_demand: list[float] = []
 
 		for pair in od_pairs:
+			pair_demand = portgraph.get_demand_by_idx(pair[0], pair[1])
+			pair_loc = bisect.bisect(od_pairs_demand, pair_demand)
+			bisect.insort(od_pairs_demand, pair_demand)
 			port_o = portgraph.get_port_by_idx(pair[0])
 			port_d = portgraph.get_port_by_idx(pair[1])
 			paths_od = self.get_paths(port_o, port_d, trans_ports)
 			if len(paths_od) > 0:
-				paths.append(paths_od)
-				connected.append(pair)
+				paths.insert(pair_loc, paths_od)
+				connected.insert(pair_loc, pair)
 			else:
 				unconnected.append(pair)
-		return connected, paths, unconnected
+				unconnected_demand.append(pair_demand)
+		connected.reverse()
+		paths.reverse()
+		od_pairs_demand.reverse()
+		return {
+			'od_pairs': connected,
+			'od_pairs_path': paths,
+			'od_pairs_demand': od_pairs_demand,
+			'unconnected': unconnected,
+			'unconnected_demand': unconnected_demand
+		}
+#
+# endregion
 
-
-################################################################################
-# Key method: solve the minimum cost
-################################################################################
-
-	def solve_approximated_cost(self, portgraph: PortGraph, vesselpool: VesselPool,
-			display: bool = False, trans_port_draft_req=0, trans_cost_req=75) -> dict:
+# region Key method: solve the minimum cost ###################################
+#
+	def solve_approximated_cost(self, portgraph: PortGraph, vesselpool: VesselPool):
+		"""To Do...
 		"""
-		return:
-			capacities, demand_vars, flow_vars
+		trans_ports = portgraph.filtered_by_transship_capacity()
+		od_pairs_dict = self.get_all_paths(portgraph, trans_ports)
+		od_pairs = od_pairs_dict['od_pairs']
+		od_pairs_paths = od_pairs_dict['od_pairs_path']
+		od_pairs_demand = od_pairs_dict['od_pairs_demand']
+		unconnected = od_pairs_dict['unconnected']
+		unconnected_demand = od_pairs_dict['unconnected_demand']
+
+		# tune
+		if len(unconnected) > 100:
+			self.__total_cost = float('inf')
+			return
+		if sum(unconnected_demand) / sum(od_pairs_demand) > 0.1:
+			self.__total_cost = float('inf')
+			return
+		# TO DO:
+		# divide the whole  `od_pairs` into several batches,
+		# then solve the cargo allocation batch by batch
+		sol = self.fulfill_demands(od_pairs, od_pairs_paths, portgraph, vesselpool)
+		self.__total_cost += sol['total cost']
+
+	def fulfill_demands(self,
+			od_pairs: list[tuple[int, int]],
+			od_pair_paths: list[list[Path]],
+			portgraph: PortGraph,
+			vesselpool: VesselPool,
+			week_levels = (1/2, 1, 2, 3, 4, 5, 6, 7, 8, 9),  # <= 5
+			tuneparams: dict[str, float] = {
+				'turnon-transship_shipclass_restriction': 0, # making the algorithm slow
+				'turnon-vessel_speed_optimization': 0,       # making the algorithm super slow
+				'ctrparam-transship_A': 100,
+				'BigM-transship': 10000,
+				'BigM-n_ships' : 2,  # at most 2 ships of the same type
+				'BigM-saildays': 64,  # at most 9 weeks, hence less than 64 days
+				'BigM-line_capacity': 30000  # at most 2 ships, with the largest capacity 14810
+			}
+	) -> dict:
 		"""
-		def create_demand_vars(od_pairs, paths) -> list[list[cp.Variable]]:
-			"""Create:
-				X_{o,d,p} = list[ X_{o,d} ] where X_{o,d} = list[ X_{o,d,p} ]
-			"""
-			demand_vars = []
-			for od, p_od in zip(od_pairs, paths):
-				x_od = []
-				for p_idx, p in enumerate(p_od):
-					x_odp_label = f'X_{(int(od[0]), int(od[1]), p_idx)}'
-					x_odp = cp.Variable(name=x_odp_label)
-					x_od.append(x_odp)
-				demand_vars.append(x_od)
-			return demand_vars
+		Optimization Problem:
 
-		def create_flow_vars() -> list[list[cp.Variable]]:
-			"""Create
-				Y_{T, seg} = list[ Y_T ] where Y_T = list[ Y_{T, seg} ]
-			"""
-			flow_vars = []
-			for line in self.__lines_list:
-				y_Ts = []
-				for slot in line.tolist_slot():
-					y_T_seg_name = f'y_({line.name(), slot.get_segment()})'
-					y_Ts.append(cp.Variable(name=y_T_seg_name))
-				flow_vars.append(y_Ts)
-			return flow_vars
+		1. Key Decision Variables
 
-		def create_capacities() -> tuple[list[list[cp.Variable]], list[float | cp.Expression]]:
-			"""Create
-				V_{T,s} is a matrix of (lines, 13)
-				C_{T} is a vector of lines
-			"""
-			ships: list[list[cp.Variable]] = []
-			capacities = []
-			for line in self.__lines_list:
-				ships_line = []
-				line_capacity: float | cp.Expression = 0.0
-				for ship in vesselpool.vessels_list:
-					ship_var = cp.Variable(name=f'V_({line.name(), ship.vessel_rank})', integer=True)  # ship number is integer
-					ships_line.append(ship_var)
-					line_capacity += ship.vessel_capacity * ship_var
-				capacities.append(line_capacity)
-				ships.append(ships_line)
-			return ships, capacities
+		- Weekly Demand Flow: `X_{ OD_pair, path }`
+		- Weekly Line Flow  : `Y_{ line, edge }`
+		- Vessel Number     : `V_{ line, rank }`   - integer
+		- Weeks             : `N_{ line, k }`    - binary
 
-		# def create_inv_speed() -> cp.Variable:
-		# 	"""Create
-		# 		inv_V = 1/v, a vector of service T
-		# 	"""
-		# 	number_of_lines = len(self.__lines_list)
-		# 	inv_V = cp.Variable(shape=number_of_lines, name='inv_V')
-		# 	return inv_V
+		2. Middle Expressions
 
-		# def create_weeks() -> cp.Variable:
-		# 	"""Create
-		# 		N is a vector of service T
-		# 	"""
-		# 	number_of_lines = len(self.__lines_list)
-		# 	weeks = cp.Variable(shape=number_of_lines, name='N')
-		# 	return weeks
+		1) Weekly Transship Amounts: `Tr_{ line, port }`
 
-		start_time = time.time()
+		Sum of all `X_{od, p}` whose path `p` going through the port.
+		Any element of `Tr` is in essense a linear combination of `X_{od, p}`.
 
-		# Find all paths
+		2) Line Capacity: `C_{ line }`
+
+		Sum of all vessel's capacity in a line.
+		Any element of `C` is in essense a linear combination of `Y_{T, seg}`.
+
+		3. Model
+
+		1) Weekly Transshipment Cost
+
+		For each `line` and `port`, cost = K * duration, where
+
+			K = transshipment cost per hour of the port,
+			prods = productivities of the port for all vessel class, and
+			duration (approximated) = Tr_{ line, port } / sum( prods ).
+
+			prods @ (V_{ line, rank } >= 0)
+
+		[[ Optional ]]
+			Given the data, we know that not all vessels can be transshipped. Hence,
+			we add a constraint by Big M's method:
+
+			If Tr_{ line, port } > A, then there should be a vessel that is
+			smaller than class `k`, where `A` is a tuning parameter, and
+			`k = argmax prods_k` is the most suitable vessel class for transshipment
+			in this port. More specifically,
+
+				V_{ line, 0 } + V_{ line, 1 } + ... + V_{ line, k } >= z
+				Tr_{ line, port } - A <= z * M
+
+			Here, z = 1_{ Tr_{ line, port } > A }.
+
+		2) Weekly Chartering Cost
+
+		For each `line` and `vclass`, cost = 7 * K * V_{ line, vclass }, where
+		`K` is daily chartering cost of the vessel class.
+
+		3) Weekly Bukering Cost
+
+		For each line, let's created a binary variable `KTS_{ line, k }` where
+		the subscript `k` denotes for the level of speed. Then, we have a one-
+		hot constraint:
+
+			sum_{k} KTS_{ line, k } == 1
+
+		and the weekly bukering cost is calculated by
+
+			cost = sum_{r,k} V_{line, r} * KTS_{line, k} * daily_cost_rate_{r, k} * 7
+
+		which is nonlinear although `KTS` is one-hot variable.
+
+		Constraints: Speed * Sailing Days ~= Distance
+
+		There are two options:
+		For simplicity, we impose a constraint that
+
+			daily_cost_rate_{r, k} == daily_cost_rate_{r, 15}
+			KTS_{line, 5} == 1
+
+		subject to constraint
+
+			10 <= speed (distance / sailing days) <= 18
+
+		[[ Optional ]]
+			If you want to optimize the speed, we resort to Big M's method to linearlize
+			this objective.
+
+			Let W_{r,k} := V_{line, r} KTS_{line, k} and M = sup|V|. Then, adding
+			these constraints:
+
+				W_{r,k} <= M * KTS_{ line, k }
+				W_{r,k} >= -M * KTS_{ line, k }
+				W_{r,k} <= V_{line, r} + M * (1 - KTS_{ line, k })
+				W_{r,k} >= V_{line, r} - M * (1 - KTS_{ line, k })
+
+			In this case, the constraint is
+
+				sum_{k} KTS_{line, k} * (k + 0.5) * 24 * sailing_days >= distance
+				sum_{k} KTS_{line, k} * (k - 0.5) * 24 * sailing_days <= distance
+
+			Note that this constraint is nonlinear: We have express the approximated
+			time of staying in port for each line, which, denoted by `port_staying_days`,
+			is a linear combination of demand flow `X_{ od, path }`. Hence,
+
+				sailing_days = sum_{k} N_{line, k} * 7 - port_staying_days
+
+			We can linearize the constraints using the same method:
+
+			Let M = sup|sailing_days| and `W_{line, k} = sailing_days * KTS_{line, k}`.
+			Then, the constraints are transformed to
+
+				sum_{k} W_{line, k} * (k + 0.5) * 24 >= distance
+				sum_{k} W_{line, k} * (k - 0.5) * 24 <= distance
+				W_{line, k} <= M * KTS_{line, k}
+				W_{line, k} >= -M * KTS_{line, k}
+				W_{line, k} <= sailing_days + M * (1 - KTS_{line, k})
+				W_{line, k} >= sailing_days - M * (1 - KTS_{line, k})
+
+		4) Weekly Port-call Cost
+
+		For each `port`...
+		"""
+		constraints = []
+		obj_expr = 0.0
+
+		n_lines = len(self.__lines_list)
+		n_vessel_class = len(vesselpool.vessels_list)
+
+
+		# region Key Variables
 		#
-		od_pairs, all_paths, _ \
-			= self.get_all_paths(portgraph, trans_port_draft_req, trans_cost_req)
-		if display:
-			print(f'get all path P finished: {round(time.time() - start_time, 2)}s')
-			start_time = time.time()
+		# (1) Create Weekly Demand Flow
+		#     X_{od,p} = list[ X_{od} ] where X_{od} = list[ X_{od,p} ]
+		demand_vars = []
+		for od, paths_od in zip(od_pairs, od_pair_paths):
+			demand_vars.append([])
+			for idx_path, _ in enumerate(paths_od):
+				demand_vars[-1].append(cp.Variable(name=f'X_{(int(od[0]), int(od[1]), idx_path)}', nonneg=True))
 
-		# Create Decision Variables
-		#
-		demand_vars = create_demand_vars(od_pairs, all_paths)
-		if display:
-			print(f'create all demand vars X finished: {round(time.time() - start_time, 2)}s')
-			start_time = time.time()
-		flow_vars = create_flow_vars()
-		if display:
-			print(f'create all flow vars Y finished: {round(time.time() - start_time, 2)}s')
-			start_time = time.time()
-		ship_vars, capacities = create_capacities()
-		if display:
-			print(f'create all capacities vars C, V finished: {round(time.time() - start_time, 2)}s')
-			start_time = time.time()
-		# weeks = create_weeks()
-		# if display:
-		# 	print(f'create weeks n_T finished: {round(time.time() - start_time, 2)}s')
-		# 	start_time = time.time()
-		# inverse_Speed = create_inv_speed()
-		# if display:
-		# 	print(f'create inverse speed inv_V_T finished: {round(time.time() - start_time, 2)}s')
-		# 	start_time = time.time()
+		# (2) Create Weekly Lines Flow
+		#     Y_{ line, seg } = list[ Y_line ] where Y_line = list[ Y_{line, seg} ]
+		flow_vars = []
+		for line in self.__lines_list:
+			flow_vars.append([])
+			for slot in line.tolist_slot():
+				flow_vars[-1].append(cp.Variable(name=f'y_({line.name(), slot.get_segment()})', nonneg=True))
 
-		# Statistics
+		# (3) Create Number of Vessels for Each Line
+		#     V_{ line, rank }
+		ship_vars = cp.Variable(shape=(n_lines, n_vessel_class), name='V', integer=True)
+		constraints.append(ship_vars >= 0)
+
+		# (4) Create Number of Weeks for Each Line
+		#     N_{ line, n }
+		n_weeks = len(week_levels)
+		week_vars = cp.Variable(shape=(n_lines, n_weeks), name='N', boolean=True)
+		constraints.append(cp.sum(week_vars, axis=1)==1)
 		#
+		# endregion
+
+
+		# region Middle Expressions
 		def add_ele_to_counts_dict(dict_key: str, dict_val: int | cp.Expression, counts_dict: dict):
 			if dict_key not in counts_dict:
 				counts_dict[dict_key] = dict_val
 			else:
 				counts_dict[dict_key] += dict_val
 
-		seg_demand_flows: dict[str, cp.Expression] = {}
-		#
-		# a matrix with rows representing for lines and columns for ports
-		transship_statistics = np.array([
+		# Weekly Transshipment & Weekly Segment Demand Flow
+		transshipments = np.array([
 			[0 for _ in portgraph.tolist_port()]
 				for _ in self.__lines_list], dtype=object)
-
-		for x_od, od, od_paths in zip(demand_vars, od_pairs, all_paths):
-			for p_idx, p in enumerate(od_paths):
-				x_odp = x_od[p_idx]
-
-				# 1. deal with the (o, d) ports
+		# >> `transship_amounts`: all demand of each port for each line
+		#     - row     = lines
+		#     - columns = ports
+		seg_demand_flows: dict[str, cp.Expression] = {}
+		# >> `seg_demand_flows`: all demand of each segment
+		#     - key   = segment (od)
+		#     - value = sum_{od} X_{od, p}
+		for demand_vars_od, od, od_paths in zip(demand_vars, od_pairs, od_pair_paths):
+			for idx_path, p in enumerate(od_paths):
+				x_od_p = demand_vars_od[idx_path]
+				# 1. there are loading/unloading at `o`, `d` ports
 				first_line = p.get_first_service_line()
 				last_line = p.get_last_service_line()
-				first_line_idx = self.__lines_list.index(first_line)
-				last_line_idx = self.__lines_list.index(last_line)
-				transship_statistics[first_line_idx, od[0]] += x_odp
-				transship_statistics[last_line_idx, od[1]] += x_odp
-
+				first_idx_line = self.__lines_list.index(first_line)
+				last_idx_line = self.__lines_list.index(last_line)
+				transshipments[first_idx_line, od[0]] += x_od_p
+				transshipments[last_idx_line, od[1]] += x_od_p
 				service_line_old = None
 				for slot in p.tolist_slot():
 					slot_service = slot.get_service()
@@ -340,160 +442,181 @@ class ServiceGraph:
 							new_service_idx = self.__lines_list.index(slot_service)
 							port_1 = slot.get_start()
 							port_1_idx = portgraph.get_unique_index(port_1)
-							transship_statistics[old_service_idx, port_1_idx] += x_odp
-							transship_statistics[new_service_idx, port_1_idx] += x_odp
+							transshipments[old_service_idx, port_1_idx] += x_od_p
+							transshipments[new_service_idx, port_1_idx] += x_od_p
 					# 3. add demand flow to segment
 					seg = slot.get_segment()
-					add_ele_to_counts_dict(str(seg), x_odp, seg_demand_flows)
+					add_ele_to_counts_dict(str(seg), x_od_p, seg_demand_flows)
 
-		if display:
-			print(f'Statistics finished: {round(time.time() - start_time, 2)}s')
-			start_time = time.time()
-
-		# Create Constraints
-		constraints = []
-
-		# Constraint: Non-negativity
-		#
-		for x_od in demand_vars:
-			for x_odp in x_od:
-				constraints.append(x_odp >= 0)
-		for y_T in flow_vars:
-			for y_T_seg in y_T:
-				constraints.append(y_T_seg >= 0)
-		for ships_line in ship_vars:
-			for ship in ships_line:
-				constraints.append(ship >= 0)
-		# constraints.append(weeks >= 0)
-		# constraints.append(inverse_Speed >= 0)
-		if display:
-			print(f'Constraints `Non-negativity` Created: {round(time.time() - start_time, 2)}s')
-			print(f'Constraints number = {len(constraints)}')
-			start_time = time.time()
-
-		# Constraint: Line Flow Y <= Line Capacity C
-		#
-		number_of_lines = len(self.__lines_list)
-		for line_idx in range(number_of_lines):
-			line_capacity = capacities[line_idx]
-			Y_Ts = flow_vars[line_idx]
-			constraints += [Y_T_seg <= line_capacity for Y_T_seg in Y_Ts]
-		if display:
-			print(f'Constraints `Y <= Line Capacity C` Created: {round(time.time() - start_time, 2)}s')
-			print(f'Constraints number = {len(constraints)}')
-			start_time = time.time()
-
-		# Constraint: Slot Flow sum_T Y_{T, i, j} >= Slot Demand Flow sum_{p has (i,j)} X_{o, d, p}
-		#
-		# 1. statistics of segment flows
-		seg_flow: dict[str, cp.Expression] = {}
+		# Weekly Segment Flow
+		seg_flows: dict[str, cp.Expression] = {}
+		# >> `seg_flows`: all flow of each segment
+		#     - key   = segment (i, j)
+		#     - value = sum_{i,j} Y_{p, i, j}
 		for y_T, line in zip(flow_vars, self.__lines_list):
-			for idx, slot in enumerate(line.tolist_slot()):
+			for idx_line, slot in enumerate(line.tolist_slot()):
 				seg = slot.get_segment()
-				add_ele_to_counts_dict(str(seg), y_T[idx], seg_flow)
-		# 2. add constraint
-		for seg_id, sum_flow in seg_flow.items():
-			constraints.append(sum_flow >= seg_demand_flows[seg_id])
-		if display:
-			print(f'Constraints sum Y_(T,i,j) >= sum X_(o,d,p) Created: {round(time.time() - start_time, 2)}s')
-			print(f'Constraints number = {len(constraints)}')
-			start_time = time.time()
+				add_ele_to_counts_dict(str(seg), y_T[idx_line], seg_flows)
 
-		# Constraint: sum X_{odp} >= D_{od}
+		# Path Distance `M_{ od, path }`
+		all_paths_distance: list[list[float]] = []
+		for od_paths in od_pair_paths:
+			od_paths_distances: list[float] = []
+			for path in od_paths:
+				od_paths_distances.append(path.get_distance(portgraph))
+			all_paths_distance.append(od_paths_distances)
 		#
-		for pair_od, x_od in zip(od_pairs, demand_vars):
+		# endregion
+
+
+		# region Objective
+		# 1. Weekly Chartering Cost
+		daily_charter_costs = vesselpool.get_chartering_costs()
+		obj_expr += 7 * cp.sum(ship_vars @ daily_charter_costs)
+
+		# 2. Weekly Transshipment Cost
+		# 1) transshipment cost per hour for each port
+		ports_costs_transsip = [port.cost_transship for port in portgraph.tolist_port()]
+		# 2) hour productivity of each port
+		ports_prods = [port.get_producticity(vesselpool) for port in portgraph.tolist_port()]
+		ports_gross_prod = [sum(prods) for prods in ports_prods]
+		# 3) suitable type of vessel for each port
+		ports_suitable_v = [np.argmax(prods) for prods in ports_prods]
+		# 4) Port staying days per week for each line (row) and each port (rolumn)
+		matrix_stay_days = np.array([[0 for _ in portgraph.tolist_port()]for _ in self.__lines_list], dtype=object)
+
+		for idx_line in range(n_lines):
+			matrix_stay_days[idx_line, :] = transshipments[idx_line, :] / ports_gross_prod / 24
+			obj_expr += matrix_stay_days[idx_line, :] @ ports_costs_transsip
+
+			# Big M's method
+			for idx_port in range(portgraph.get_number_of_ports()):
+				if tuneparams['turnon-transship_shipclass_restriction'] > 0.5:
+					transamount = transshipments[idx_line, idx_port]
+					z = cp.Variable(boolean=True)
+					constraints.append(transamount - tuneparams['ctrparam-transship_A'] <= z * tuneparams['BigM-transship'])
+					idf = ports_suitable_v[idx_port]
+					constraints.append(cp.sum(ship_vars[idx_line, : (idf + 1)]) >= z)
+
+		# 3. Weekly Bukering Cost
+		daily_bukering_cost_rates, speed_level0 = vesselpool.get_bukering_costs()  # shape = (rank, speed)
+		n_speed_level = daily_bukering_cost_rates.shape[1]
+		KTS_levels = np.arange(speed_level0, speed_level0 + n_speed_level)
+		list_saildays = []
+
+		for idx_line, line in enumerate(self.__lines_list):
+			line_ship_vars = ship_vars[idx_line, :]   # shape = (rank,)
+			line_distance = line.get_distance(portgraph)
+			line_port_stay_days = np.sum(matrix_stay_days[idx_line, :])
+			line_sailing_days = 7 * (week_vars[idx_line, :] @ week_levels) - line_port_stay_days
+			list_saildays.append(line_sailing_days)
+
+			if tuneparams['turnon-vessel_speed_optimization'] < 1/2:
+				obj_expr += 7 * line_ship_vars @ vesselpool.get_bukering_cost_middle()
+				# Constraint: KTS_min <= Speed (distance / sailing days) <= KTS_max
+				constraints.append(line_sailing_days >= 0.5 * 7)
+				constraints.append(line_distance >= 24 * line_sailing_days * (KTS_levels[0] - 1))
+				constraints.append(line_distance <= 24 * line_sailing_days * (KTS_levels[-1] + 1))
+
+			else:  # if we want to further optimize the bukering cost by determine optimal speed
+				# Auxiliary Variable:
+				#     W_{r,k} = line_ship_vars_{r} * KTS_vars_{k}
+				aux_W_shipspeed = cp.Variable(shape=daily_bukering_cost_rates.shape)  # shape = (rank, speed)
+				obj_expr += 7 * cp.multiply(aux_W_shipspeed, daily_bukering_cost_rates).sum()
+
+				# Binary variable for speed
+				#     KTS_vars_{k}
+				line_KTS_vars = cp.Variable(name='Z', shape=(n_speed_level), boolean=True)  # shape = (speed,)
+				constraints.append(cp.sum(line_KTS_vars) == 1)
+
+				KTS_line_stack = cp.vstack([line_KTS_vars] * n_vessel_class)
+				line_ship_stack = cp.vstack([line_ship_vars] * n_speed_level).T
+				big_M_nship = tuneparams['BigM-n_ships']
+				bigM_saildays = tuneparams['BigM-saildays']
+				constraints.append(aux_W_shipspeed <= big_M_nship * KTS_line_stack)
+				constraints.append(aux_W_shipspeed >= -big_M_nship * KTS_line_stack)
+				constraints.append(aux_W_shipspeed <= line_ship_stack + big_M_nship * (1 - KTS_line_stack))
+				constraints.append(aux_W_shipspeed >= line_ship_stack - big_M_nship * (1 - KTS_line_stack))
+
+				# Constraint: Optimal Speed * Sailing Days ~= Distance
+				aux_W_speedsaildays = cp.Variable(shape=n_speed_level)
+				constraints.append(24 * aux_W_speedsaildays @ (KTS_levels + 1) >= line_distance)
+				constraints.append(24 * aux_W_speedsaildays @ (KTS_levels - 1) <= line_distance)
+
+				for idx_kts in range(n_speed_level):
+					z_kts = line_KTS_vars[idx_kts]
+					constraints.append(aux_W_speedsaildays[idx_kts] <= bigM_saildays * z_kts)
+					constraints.append(aux_W_speedsaildays[idx_kts] >= -bigM_saildays * z_kts)
+					constraints.append(aux_W_speedsaildays[idx_kts] <= line_sailing_days + bigM_saildays * (1 - z_kts))
+					constraints.append(aux_W_speedsaildays[idx_kts] >= line_sailing_days - bigM_saildays * (1 - z_kts))
+
+		# 4. Weekly Port Call Cost
+		# for port in line.tolist_port():
+		# 	portcall_cost_rate = port.get_port_call_costs(vesselpool)
+		# 	for idx_V, V in enumerate(ships_of_serviceline):
+		# 		obj_expr += V * portcall_cost_rate[idx_V] / weeks[idx_line]
+		#
+		# endregion
+
+
+		# region Key Constraints
+		# Constraint: (Weekly Demand Flow) sum X_{odp} >= (Weekly Demand) D_{od}
+		for pair_od, demand_vars_od in zip(od_pairs, demand_vars):
 			demand_od = portgraph.get_demand_by_idx(pair_od[0], pair_od[1])
 			demand_od_fulfill = 0
-			for x_odp in x_od:
-				demand_od_fulfill += x_odp
+			for x_od_p in demand_vars_od:
+				demand_od_fulfill += x_od_p
 			constraints.append(demand_od_fulfill >= demand_od)
-		if display:
-			print(f'Constraints sum X_(odp) >= D_(od) Created: {round(time.time() - start_time, 2)}s')
-			print(f'Constraints number = {len(constraints)}')
-			start_time = time.time()
 
-		# Constraint: Max Daily Port Call Limits
+		# Constraint: (Weekly Edge Flow) sum_T Y_{T, i, j} >= (Weekly Line Demand Flow) sum_{p has (i,j)} X_{o, d, p}
+		for seg_id, seg_demand_flow in seg_demand_flows.items():
+			constraints.append(seg_flows[seg_id] >= seg_demand_flow)
+
+		# Constraint: (Weekly Line Flow) Y <= (Weekly Line Capacity) C
+		ships_capacities = [s.vessel_capacity for s in vesselpool.vessels_list]
+		line_capacities = ship_vars @ ships_capacities  # shape = (line,)
+		bigM_line_capacity = tuneparams['BigM-line_capacity']
+
+		for idx_line in range(n_lines):
+			line_capacity = line_capacities[idx_line]
+			line_week_vars = week_vars[idx_line, :]
+			aux_capacity_weeks = cp.Variable(shape=n_weeks)  # Z_{week=k} * LC / k for each k
+			constraints.extend(Y_T_seg <= cp.sum(aux_capacity_weeks) for Y_T_seg in flow_vars[idx_line])
+			for idx_wk, wk in enumerate(week_levels):  # loop over weeks
+				aux_C_Wk = aux_capacity_weeks[idx_wk]
+				is_wk = line_week_vars[idx_wk]
+				constraints.append(aux_C_Wk <= bigM_line_capacity * is_wk)
+				constraints.append(aux_C_Wk >= -bigM_line_capacity * is_wk)
+				constraints.append(aux_C_Wk <= line_capacity / wk + bigM_line_capacity * (1 - is_wk))
+				constraints.append(aux_C_Wk >= line_capacity / wk - bigM_line_capacity * (1 - is_wk))
 		#
-		# 1. statistics of port calls
-		port_call_counts: dict[str, cp.Expression] = {}
-		for line_idx, line in enumerate(self.__lines_list):
-			line_ship_number: int | cp.Expression = 0
-			line_ships = ship_vars[line_idx]
-			for ship in line_ships:
-				line_ship_number += ship
-			for port in line.tolist_port():
-				add_ele_to_counts_dict(port.get_id(), line_ship_number, port_call_counts)
-		# 2. add constraints
-		for port_id, number_of_calls in port_call_counts.items():
-			port = portgraph.get_port(port_id)
-			constraints.append(number_of_calls <= port.max_daily_call)
-		if display:
-			print(f'Constraints Max Daily Port Call Limits Created: {round(time.time() - start_time, 2)}s')
-			print(f'Constraints number = {len(constraints)}')
-			start_time = time.time()
+		# endregion
 
-		# Define OBJ
-		#
-		obj_expr = 0.0
-		#
-		# 0. Prepare: create path distances M_{o, d, p}
-		# all_paths_distance: list[list[float]] = []
-		# for od_paths in all_paths:
-		# 	od_paths_distances: list[float] = []
-		# 	for path in od_paths:
-		# 		od_paths_distances.append(path.get_distance(portgraph))
-		# 	all_paths_distance.append(od_paths_distances)
-		# if display:
-		# 	print(f'get all path distances M finished: {round(time.time() - start_time, 2)}s')
-		# 	start_time = time.time()
-		#
-		# 1. chartering cost and port call cost
-		# for idx, line in enumerate(self.__lines_list):
-		# 	ships_of_serviceline = ships[idx, :]
-		# 	# (1) chartering cost
-		# 	obj_expr += ships_of_serviceline @ vesselpool.get_chartering_costs() * 7
-		# 	# (2) port call cost
-		# 	for port in line.tolist_port():
-		# 		obj_expr += ships_of_serviceline @ port.get_port_call_costs(vesselpool)
-		# 2. transshipment cost & bukering cost
-		bukering_unit_cost = vesselpool.get_bukering_cost_middle()
-		bukering_cost = 0
-		transship_cost = 0
-		for line_idx, line in enumerate(self.__lines_list):
-			line_distance = line.get_distance(portgraph)
-			line_ships = ship_vars[line_idx]
-			for ship, unit_cost in zip(line_ships, bukering_unit_cost):
-				bukering_cost += line_distance * ship * unit_cost
-		obj_expr += bukering_cost
-
-		for port_idx, port in enumerate(portgraph.tolist_port()):
-			port_prods = port.get_producticity_for_each_vessel_type(vesselpool)
-			port_gross_prod = np.sum(port_prods)
-			transship_amount = np.sum(transship_statistics[:, port_idx])
-			duration = transship_amount / port_gross_prod
-			transship_cost += duration * port.cost_transship
-		obj_expr += transship_cost
-
-		if display:
-			print(f'Objective Created: {round(time.time() - start_time, 2)}s')
-			print(obj_expr)
-			start_time = time.time()
-
-		# problem
+		# region Call Solver
 		prob = cp.Problem(cp.Minimize(obj_expr), constraints)
-		# solve
-		prob.solve() 
-		#prob.solve(solver=cp.GLPK, verbose=True)
+		prob.solve(solver=cp.SCIP, verbose=False)
+		# prob.solve(solver=cp.ECOS)
+		# prob.solve(solver=cp.GLPK_MI)  # much slower than SCIP
+		#
+		#endregion
 
-		self.__total_cost = typing.cast(float, prob.value)
-		if display:
-			print(f'Problem solved: {round(time.time() - start_time, 2)}s')
 		return {
+			'total cost': typing.cast(float, prob.value),
 			'line flows': flow_vars,
 			'demand rounts': demand_vars,
-			# 'weeks': weeks,
+			'weeks': week_vars,
 			'ships': ship_vars,
+			'port staying days': matrix_stay_days,
+			'line sailing days': list_saildays,
 		}
 
+
 	def solve_plan(self) -> None:
+		"""
+		Consider the following:
+			1. Daily port call limit
+			2. Storage Cost
+		"""
 		pass
+#
+# endregion
