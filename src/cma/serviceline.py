@@ -173,9 +173,9 @@ class Path:
 		# ports
 		ports = self.tolist_port()
 		port_locs = [Point(port.get_location()) for port in ports]
-		port_idxs = [idx + 1 for idx, _ in enumerate(ports)]
+		idx_ports = [idx + 1 for idx, _ in enumerate(ports)]
 		port_names = [port.get_id() for port in ports]
-		gdf_ports = gpd.GeoDataFrame({'idx': port_idxs, 'names': port_names, 'geometry': port_locs})
+		gdf_ports = gpd.GeoDataFrame({'idx': idx_ports, 'names': port_names, 'geometry': port_locs})
 		minx, miny, maxx, maxy = gdf_ports.geometry.total_bounds
 		# hubs
 		hubs = self.get_hubs()
@@ -210,7 +210,7 @@ class Path:
 		# plot ports
 		if gdf_hubs is not None:
 			gdf_hubs.plot(ax=ax, color='red', markersize = 20)
-		for x, y, idx in zip(gdf_ports.geometry.x, gdf_ports.geometry.y, port_idxs):
+		for x, y, idx in zip(gdf_ports.geometry.x, gdf_ports.geometry.y, idx_ports):
 			ax.text(x, y, str(idx), fontsize=10, va='bottom')
 		# for x, y, label in zip(gdf_hubs.geometry.x, gdf_hubs.geometry.y, gdf_hubs['hubs']):
 		# 	ax.text(x, y, label, fontsize=10, va='bottom')
@@ -400,9 +400,9 @@ class ServiceLine:
 			raise TypeError(f'file `{file}` invalid')
 		region = world.loc[world_names.isin(selected_countries)]
 		port_locs = [Point(port.get_location()) for port in self.__line]
-		port_idxs = [idx + 1 for idx, _ in enumerate(self.__line)]
+		idx_ports = [idx + 1 for idx, _ in enumerate(self.__line)]
 		port_names = [port.get_id() for port in self.__line]
-		gdf_ports = gpd.GeoDataFrame({'idx': port_idxs, 'names': port_names, 'locs': port_locs, 'geometry': port_locs})
+		gdf_ports = gpd.GeoDataFrame({'idx': idx_ports, 'names': port_names, 'locs': port_locs, 'geometry': port_locs})
 		minx, miny, maxx, maxy = gdf_ports.geometry.total_bounds
 		# plot region
 		_, ax = plt.subplots(figsize = fig_size)
@@ -428,7 +428,7 @@ class ServiceLine:
 
 		# plot ports
 		gdf_ports.plot(ax=ax, color='red', markersize = 20)
-		for x, y, idx in zip(gdf_ports.geometry.x, gdf_ports.geometry.y, port_idxs):
+		for x, y, idx in zip(gdf_ports.geometry.x, gdf_ports.geometry.y, idx_ports):
 			ax.text(x, y, str(idx), fontsize=10, va='bottom')
 		plt.legend(loc="center left", bbox_to_anchor=(1, 0.5), handlelength=0)
 		plt.pause(0.1)
@@ -616,18 +616,18 @@ class ServiceLine:
 		"""
 		sequence = self.tolist_port().copy()
 		if action.cmd == 'add':
-			start_idx, end_idx, port_idx = action.loc[0], action.loc[1], action.loc[2]
+			start_idx, end_idx, idx_port = action.loc[0], action.loc[1], action.loc[2]
 			start = ports_pool.get_port_by_idx(start_idx)
 			end = ports_pool.get_port_by_idx(end_idx)
-			port = ports_pool.get_port_by_idx(port_idx)
+			port = ports_pool.get_port_by_idx(idx_port)
 			for idx, p in enumerate(self.__line):
 				if p == start and self.next_port_of_idx(idx) == end:
 					sequence.insert(idx + 1, port)
 		elif action.cmd == 'delete':
-			start_idx, end_idx, port_idx = action.loc[0], action.loc[1], action.loc[2]
+			start_idx, end_idx, idx_port = action.loc[0], action.loc[1], action.loc[2]
 			start = ports_pool.get_port_by_idx(start_idx)
 			end = ports_pool.get_port_by_idx(end_idx)
-			port = ports_pool.get_port_by_idx(port_idx)
+			port = ports_pool.get_port_by_idx(idx_port)
 			for idx, p in enumerate(self.__line):
 				if p == port and self.next_port_of_idx(idx) == end and self.prev_port_of_idx(idx) == start:
 					sequence.pop(idx)
