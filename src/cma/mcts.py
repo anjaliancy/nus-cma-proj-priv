@@ -133,7 +133,7 @@ class MonteCarloTreeSearchNode:
 			- Append the used action to `self.borns`
 		Return:
 			- Return the created node if successful
-			- Return None is the maximum depth is reached
+			- Return None if the maximum depth is reached
 		"""
 		if self.get_depth() >= max_depth:
 			return None
