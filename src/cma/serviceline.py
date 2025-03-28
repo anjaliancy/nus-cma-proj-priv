@@ -7,7 +7,7 @@ import typing
 import numpy as np
 import pandas as pd
 import geopandas as gpd
-
+from importlib import resources
 from collections import Counter
 from matplotlib import pyplot as plt
 from shapely.geometry import LineString, Point
@@ -159,11 +159,13 @@ class Path:
 			dist += portgraph.get_distance(port_i, port_j)
 		return dist
 
-	def plot(self, file: str, selected_countries: list[str], fig_size = (15, 9), eps = 3):
+	def plot(self, selected_countries: list[str], fig_size = (15, 9), eps = 3):
 		"""Plot the service line
 		"""
 		# region
-		world = gpd.read_file(file)
+		MAP_FILE_PATH = '110m_cultural/ne_110m_admin_0_countries.shp'
+		file = resources.files("cma.res").joinpath(MAP_FILE_PATH)
+		world = gpd.read_file(str(file))
 		if not isinstance(world, gpd.GeoDataFrame):
 			raise TypeError(f'file `{file}` invalid')
 		world_names = world['NAME']
@@ -389,10 +391,12 @@ class ServiceLine:
 	def prev_port_of_idx(self, idx: int) -> Port:
 		return self.__line[self.idx_of_prev_idx(idx)]
 
-	def plot(self, file: str, selected_countries: list[str], fig_size = (15, 9), eps = 2):
+	def plot(self, selected_countries: list[str], fig_size = (15, 9), eps = 2):
 		"""Plot the service line
 		"""
-		world = gpd.read_file(file)
+		MAP_FILE_PATH = '110m_cultural/ne_110m_admin_0_countries.shp'
+		file = resources.files("cma.res").joinpath(MAP_FILE_PATH)
+		world = gpd.read_file(str(file))
 		if not isinstance(world, gpd.GeoDataFrame):
 			raise TypeError(f'file `{file}` invalid')
 		world_names = world['NAME']

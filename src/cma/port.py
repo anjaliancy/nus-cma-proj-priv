@@ -4,7 +4,7 @@ port.py
 Define all port related classes and methods
 """
 from typing import Tuple
-
+from importlib import resources
 from matplotlib import pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib.axes import Axes
@@ -121,19 +121,21 @@ class PortPool:
 	def get_number_of_ports(self) -> int:
 		return len(self.__port_list)
 
-	def plot(self, file: str, selected_countries: list[str],
+	def plot(self, selected_countries: list[str],
 				plot_port_id: bool = False) -> Tuple[Figure, Axes, 'PortPool']:
 		"""
 		This function input `selected_asia_countries` as a filter and
 		return a filtered new collection of ports that is only contained
 		in the graph.
 		"""
+		MAP_FILE_PATH = '110m_cultural/ne_110m_admin_0_countries.shp'
+		file = resources.files("cma.res").joinpath(MAP_FILE_PATH)
 		geometry = [Point(port.get_location()) for port in self.__port_list]
 		gdf = gpd.GeoDataFrame({
 			'Port': [port.get_id() for port in self.__port_list],
 			'geometry': geometry
 			})
-		world = gpd.read_file(file)
+		world = gpd.read_file(str(file))
 		if not isinstance(world, gpd.GeoDataFrame):
 			raise ValueError('Invalid file', file)
 		world_names = world['NAME']

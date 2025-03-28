@@ -1,4 +1,6 @@
+import chardet
 from typing import Tuple
+from importlib import resources
 
 from .vessel import Vessel, VesselPool
 from .port import Port, PortPool, PortGraph
@@ -8,15 +10,16 @@ import pandas as pd
 import numpy as np
 
 
-data_file_vessel = "../data_2024-12-23/VESSEL_CLASS_Dataset.xlsx"
-data_file_port = "../data_2024-12-23/Port_Dataset.xlsx"
-data_file_port_call = "../data_2024-12-23/PORT_CALL_Details_Dataset.xlsx"
-data_file_sail_distance = "../data_2024-12-23/SAILING_DISTANCE_Dataset.csv"
-data_file_current_line = "../data_2024-12-23/CURR_LINES_Dataset.xlsx"
-data_file_demand = "../data_2024-12-23/Demand_Dataset.xlsx"
+data_file_vessel = "data_2024-12-23/VESSEL_CLASS_Dataset.xlsx"
+data_file_port = "data_2024-12-23/Port_Dataset.xlsx"
+data_file_port_call = "data_2024-12-23/PORT_CALL_Details_Dataset.xlsx"
+data_file_sail_distance = "data_2024-12-23/SAILING_DISTANCE_Dataset.csv"
+data_file_demand = "data_2024-12-23/Demand_Dataset.xlsx"
+data_file_current_line = "data_2024-12-23/CURR_LINES_Dataset.xlsx"
 
 def read_vessel_class_data() -> VesselPool:
-	df = pd.read_excel(data_file_vessel)  # read first table
+	file = resources.files('cma.res').joinpath(data_file_vessel)
+	df = pd.read_excel(file)  # read first table
 	df = df.rename(columns=lambda x: x.strip())  # trim titles
 	vessels_list = []
 	numbers_list = []
@@ -51,7 +54,8 @@ def read_port_data() -> Tuple[PortPool, PortPool]:
 	port_pool_list_complete_info = []
 	# 1. port data
 	#
-	df_port = pd.read_excel(data_file_port)
+	file1 = resources.files('cma.res').joinpath(data_file_port)
+	df_port = pd.read_excel(file1)
 	df_port = df_port.rename(columns=lambda x: x.strip())  # trim titles
 	for _, row in df_port.iterrows():
 		# deal with transshipment cost dummy:
@@ -79,8 +83,9 @@ def read_port_data() -> Tuple[PortPool, PortPool]:
 		)
 	# 2. port call data (filter)
 	#
-	df_port_call_1 = pd.read_excel(data_file_port_call, sheet_name = 'Sheet1')  # read first table
-	df_port_call_2 = pd.read_excel(data_file_port_call, sheet_name = 'Sheet2')  # read first table
+	file2 = resources.files('cma.res').joinpath(data_file_port_call)
+	df_port_call_1 = pd.read_excel(file2, sheet_name = 'Sheet1')  # read first table
+	df_port_call_2 = pd.read_excel(file2, sheet_name = 'Sheet2')  # read first table
 	df_port_call_1 = df_port_call_1.rename(columns=lambda x: x.strip())  # trim titles
 	df_port_call_2 = df_port_call_2.rename(columns=lambda x: x.strip())  # trim titles
 
@@ -120,7 +125,8 @@ def read_sailing_distance_data(portpool: PortPool) -> np.matrix:
 		p.get_id() : idx for idx, p in enumerate(portpool.tolist_port())
 	}
 	dist_matrix = np.ones((len(port_mapping), len(port_mapping))) * float('inf')
-	df = pd.read_csv(data_file_sail_distance)  # read first table
+	file = resources.files('cma.res').joinpath(data_file_sail_distance)
+	df = pd.read_csv(str(file))  # read first table
 	df = df.rename(columns=lambda x: x.strip())  # trim titles
 
 	for _, row in df.iterrows():
@@ -149,7 +155,8 @@ def read_demand_data(portpool: PortPool) -> tuple[dict, np.matrix]:
 	total_demands = np.ones((len(port_mapping), len(port_mapping))) * 0.0
 	demands_dict = dict(zip(days, demands))
 
-	df = pd.read_excel(data_file_demand, sheet_name="Sheet1")
+	file = resources.files('cma.res').joinpath(data_file_demand)
+	df = pd.read_excel(file, sheet_name="Sheet1")
 	df = df.rename(columns=lambda x: x.strip())  # trim titles
 
 	for _, row in df.iterrows():
@@ -173,7 +180,9 @@ def read_current_line_data(portpool: PortPool, display = False) -> tuple[list[Se
 	"""
 	current_lines = []
 	current_lines_weeks = []
-	df = pd.read_excel(data_file_current_line, sheet_name='Sheet1')  # read first table
+
+	file = resources.files('cma.res').joinpath(data_file_current_line)
+	df = pd.read_excel(file, sheet_name='Sheet1')  # read first table
 	df = df.rename(columns=lambda x: x.strip())  # trim titles
 
 	df_grouped = df.groupby('Line Name').agg({
