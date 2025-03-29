@@ -443,7 +443,7 @@ class MonteCarloTree:
 			'num_rollout': self.num_rollout
 		}
 
-	def display_best_node(self, portgraph: PortGraph, servicegraph: ServiceGraph) -> MonteCarloTreeSearchNode:
+	def display_best_node(self, portgraph: PortGraph) -> MonteCarloTreeSearchNode:
 		best_node = self.best_node()
 		best_action_info = best_node.action_trace()
 		best_actions = best_action_info['best actions']
