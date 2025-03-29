@@ -10,9 +10,12 @@ import math
 import random
 import pickle
 
+import pandas as pd
+from statsmodels.regression.linear_model import RegressionResultsWrapper
+
 from .vessel import VesselPool
 from .port import PortGraph
-from .servicegraph import ServiceGraph, GraphAction
+from .servicegraph import ServiceGraph, GraphAction # type: ignore
 
 
 class MonteCarloTreeSearchNode:
@@ -61,7 +64,7 @@ class MonteCarloTreeSearchNode:
 
 	def get_all_actions_and_probs(self, portgraph: PortGraph) -> tuple[list[GraphAction], list[float]]:
 		_, actions = self.graph.get_feasible_actions(portgraph)
-		probs = [random.uniform(0, 1) for _ in actions]
+		probs = [1.0 for _ in actions] #[random.uniform(0, 1) for _ in actions]
 		## TO DO
 		# Using Neural Network
 		return actions, probs
@@ -69,6 +72,31 @@ class MonteCarloTreeSearchNode:
 ###############################################################################
 # Tree structure related
 ###############################################################################
+
+	def action_trace(self) -> dict[str, list]:
+		"""
+		Return:
+			- a list of best actions
+			- the total cost after updation
+			- amount of siblings
+		"""
+		best_actions: list[GraphAction] = []
+		updated_cost: list[float] = []
+		siblings: list[int] = []
+
+		node = self
+		while node.parent is not None:
+			node_loc = node.parent.children.index(node)
+			node_action = node.parent.borns[node_loc]
+			best_actions.insert(0, node_action)
+			updated_cost.insert(0, node.graph.total_cost())
+			siblings.insert(0, len(node.parent.children))
+			node = node.parent
+		return {
+			'best actions': best_actions,
+			'updated costs': updated_cost,
+			'siblings': siblings
+		}
 
 	def get_depth(self) -> int:
 		"""How many upsprings
@@ -158,7 +186,13 @@ class MonteCarloTreeSearchNode:
 # MCTS related
 ###############################################################################
 
-	def rollout(self, portgraph: PortGraph, vesselpool: VesselPool, discount_fac: float, valid_weight_proportion: float):
+	def rollout(self,
+			portgraph: PortGraph,
+			vesselpool: VesselPool,
+			discount_fac: float,
+			valid_weight_proportion: float,
+			week_predictor: None | RegressionResultsWrapper = None
+		):
 		"""
 		Input:
 			`discount_fac`
@@ -192,8 +226,8 @@ class MonteCarloTreeSearchNode:
 			assert child_node is not None
 			# child_node is not None since `max_depth = infty`
 
-			the_node = child_node
-			the_node.graph.solve_approximated_cost(portgraph, vesselpool)
+			the_node: MonteCarloTreeSearchNode = child_node
+			the_node.graph.solve_approximated_cost(portgraph, vesselpool, week_predictor=week_predictor)
 			# Check stopping
 			sum_weight *= discount_fac
 			sum_weight += 1
@@ -231,12 +265,14 @@ class MonteCarloTreeSearchNode:
 		# use NN to update prob of each node
 
 	def expand(self, portgraph: PortGraph, vesselpool: VesselPool,
-			max_depth: int, c_param: float, discount_fac: float, valid_weight_proportion: float):
+			max_depth: int, c_param: float, discount_fac: float, valid_weight_proportion: float,
+			week_predictor: None | RegressionResultsWrapper = None
+		):
 		"""A more balanced way of expansion
 		"""
 		if self.get_depth() == max_depth:
-			print("到底了，多进行一次rollout！")
-			self.rollout(portgraph, vesselpool, discount_fac, valid_weight_proportion)
+			# print("到达最大深度，多进行一次rollout")
+			self.rollout(portgraph, vesselpool, discount_fac, valid_weight_proportion, week_predictor)
 			self.back_propagate(discount_fac)
 			return
 
@@ -245,6 +281,8 @@ class MonteCarloTreeSearchNode:
 
 		for idx, action in enumerate(actions):
 			if action not in self.borns:
+				# pucb = self.current_state_reward() + c_param * probs[idx] * self.number_of_visits**0.5
+				## for unborns, predict their reward by father
 				pucb = c_param * probs[idx] * self.number_of_visits**0.5
 			else: # in borns/children
 				c = self.children[self.borns.index(action)]
@@ -257,7 +295,7 @@ class MonteCarloTreeSearchNode:
 		if selected_act not in self.borns:
 			self.add_child(selected_act, portgraph, probs[selected_act_idx], max_depth)
 		else:
-			print('在 expand 的时候找到已出生的孩子节点，递归进行 expand！')
+			# print('在 expand 的时候找到已出生的孩子节点，递归进行 expand')
 			c = self.children[self.borns.index(selected_act)]
 			c.expand(portgraph, vesselpool, max_depth, c_param, discount_fac, valid_weight_proportion)
 
@@ -278,18 +316,23 @@ class MonteCarloTreeSearchNode:
 		# 	return self
 
 	def search_step(self, portgraph: PortGraph, vesselpool: VesselPool, max_depth: int,
-		 	discount_fac: float, valid_weight_proportion: float, c_param: float = 1):
+		 	discount_fac: float, valid_weight_proportion: float, c_param: float = 1,
+			week_predictor: None | RegressionResultsWrapper = None,
+			recorder: None | dict[str,int] = None
+		):
 		"""Using the more balanced way of expansion
 		"""
 		c = self.select(c_param)
 
 		if c.number_of_visits == 0:
-			c.rollout(portgraph, vesselpool, discount_fac, valid_weight_proportion)
+			c.rollout(portgraph, vesselpool, discount_fac, valid_weight_proportion, week_predictor)
 			c.back_propagate(discount_fac)
-			print("call rollout")
+			if recorder is not None:
+				recorder['num_rollout'] += 1
 		else:
-			c.expand(portgraph, vesselpool, max_depth, c_param, discount_fac, valid_weight_proportion)
-			print("call expand")
+			c.expand(portgraph, vesselpool, max_depth, c_param, discount_fac, valid_weight_proportion, week_predictor)
+			if recorder is not None:
+				recorder['num_expand'] += 1
 
 
 ###############################################################################
@@ -317,7 +360,7 @@ class MonteCarloTreeSearchNode:
 		return q_value + c_param * self.prior_prob * tmp
 
 	def current_state_reward(self) -> float:
-		return 1.0e4 / self.graph.total_cost()
+		return - self.graph.total_cost()
 
 
 
@@ -327,38 +370,59 @@ class MonteCarloTree:
 	root_node: MonteCarloTreeSearchNode
 	portgraph: PortGraph
 	vesselpool: VesselPool
-
-	discount_fac: float  # discount factor `beta`
 	c_param: float
+	discount_fac: float  # discount factor `beta`
 	max_depth: int
+	week_predict_data: pd.DataFrame
+	week_predict_model: None | RegressionResultsWrapper
 
-	def __init__(self, service_graph: ServiceGraph,
+	num_expand: int
+	num_rollout: int
+
+	def __init__(self, servicegraph: ServiceGraph,
 			portgraph: PortGraph,
 			vesselpool: VesselPool,
 			discount_fac:float=0.5,
+			c_param: float=0.5,
 			max_depth: int=5,
-			c_param:float=0.0005):
+			week_predict_model: None | RegressionResultsWrapper = None):
 		'''
 		Input:
 			`max_depth`: depth of root is zero
 		'''
-		self.root_node = MonteCarloTreeSearchNode(service_graph, 1, None)
+		self.root_node = MonteCarloTreeSearchNode(servicegraph, 1, None)
 		self.portgraph = portgraph
 		self.vesselpool = vesselpool
-
-		self.discount_fac = discount_fac
 		self.c_param = c_param
+		self.discount_fac = discount_fac
 		self.max_depth = max_depth
+		self.week_predict_model = week_predict_model
+
+		self.num_expand = 0
+		self.num_rollout = 0
 
 	def run(self, epochs: int):
+		"""
+		Input:
+			- c_param: must be strictly positive
+		"""
+		recorder={
+					'num_expand': self.num_expand,
+					'num_rollout': self.num_rollout
+				}
 		for _ in range(epochs):
 			self.root_node.search_step(
 				self.portgraph,
 				self.vesselpool,
 				self.max_depth,
 				self.discount_fac,
-				valid_weight_proportion=0.9
+				valid_weight_proportion=0.9,
+				c_param=self.c_param,
+				week_predictor=self.week_predict_model,
+				recorder=recorder
 			)
+		self.num_expand = recorder['num_expand']
+		self.num_rollout = recorder['num_rollout']
 
 ###############################################################################
 # Statistics
@@ -370,8 +434,31 @@ class MonteCarloTree:
 	def best_node(self) -> MonteCarloTreeSearchNode:
 		return self.root_node.best_sub_node(self.portgraph)
 
-	def best_node_byucb(self) -> MonteCarloTreeSearchNode:
-		return self.root_node.best_sub_node_byucb(self.portgraph, self.c_param)
+	def best_node_byucb(self, c_param: float=1e-3) -> MonteCarloTreeSearchNode:
+		return self.root_node.best_sub_node_byucb(self.portgraph, c_param)
+
+	def recorder(self) -> dict[str, int]:
+		return {
+			'num_expand': self.num_expand,
+			'num_rollout': self.num_rollout
+		}
+
+	def display_best_node(self, portgraph: PortGraph, servicegraph: ServiceGraph) -> MonteCarloTreeSearchNode:
+		best_node = self.best_node()
+		best_action_info = best_node.action_trace()
+		best_actions = best_action_info['best actions']
+		updated_costs = best_action_info['updated costs']
+		siblings = best_action_info['siblings']
+
+		print('Best Action Trace:')
+		the_node = self.root_node
+		for idx_action, action in enumerate(best_actions):
+			print(action.explain(portgraph, the_node.graph, idx_action))
+			print(f'Siblings in this layer = {siblings[idx_action]}')
+			print(f'Updated cost = {updated_costs[idx_action]}\n')
+			index_child = the_node.borns.index(action)
+			the_node = the_node.children[index_child]
+		return best_node
 
 	# def is_fully_expand(self):
 	# 	return self.root_node.is_fully_expand(self.portgraph, self.max_depth)

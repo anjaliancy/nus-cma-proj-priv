@@ -3,10 +3,12 @@ Module `service`
 
 Define all service related classes and methods
 """
-import typing
+from typing import Union, TypeGuard, Self
+import heapq
 import numpy as np
 import pandas as pd
 import geopandas as gpd
+from sklearn.cluster import KMeans
 from importlib import resources
 from collections import Counter
 from matplotlib import pyplot as plt
@@ -80,7 +82,6 @@ class Slot:
 	def get_distance(self, portgraph: PortGraph) -> float:
 		return portgraph.get_distance(
 			self.__segment.first, self.__segment.second)
-
 
 class Path:
 	"""class Path
@@ -219,7 +220,6 @@ class Path:
 		plt.legend(loc="center left", bbox_to_anchor=(1, 0.5))
 		plt.pause(0.1)
 
-
 class LineAction:
 	"""class LineAction
 
@@ -253,21 +253,21 @@ class ServiceLine:
 	"""
 	__name: str
 	__line: list[Port]
+	week: int = 999999
 
-	def __init__(self, name: str, line: list[str], ports_pool: PortPool, _test: bool = False, display = False):
+	def __init__(self, name: str, line: list[Port], _test: bool=False, verbose=False, warn=True):
 		self.__name = name
-		self.__line = []
-		for port_id in line:
-			self.__line.append(ports_pool.get_port(port_id))
-		if (not _test) and False is self.check_valid():
-			if display:
+		self.__line = line
+
+		if (not _test) and False is self.check_valid(warn):
+			if verbose:
 				print(f'Invalid line "{name}":', line)
 			raise ValueError(f'Invalid line {name}')
 
 	def __repr__(self) -> str:
 		return self.__name + ' -- ' + str(self.__line)
 
-	def check_valid(self) -> bool:
+	def check_valid(self, warn=True) -> bool:
 		# Case 1: include less than 2 ports
 		#
 		# we allow for this kind of action since it means to delete the service line
@@ -282,19 +282,22 @@ class ServiceLine:
 			# Case 2: staying
 			# For example, line contains (..., P1, P1, ....)
 			if self.__line[loc] == self.__line[loc_next_1]:
-				print("Warning: Invalid since a port is visited consecutively.")
+				if warn:
+					print("Warning: Invalid since a port is visited consecutively.")
 				return False
 			# Case 3: repeated line
 			# For example, line contains (..., P1, P2, P1, P2, ...)
 			if len(self.__line) > 3 \
 					and self.__line[loc] == self.__line[loc_next_2] \
 					and self.__line[loc_next_1] == self.__line[loc_next_3]:
-				print("Warning: Invalid since a slot is repeated.")
+				if warn:
+					print("Warning: Invalid since a slot is repeated.")
 				return False
 		## Case 4: a port visited more than 3 times
 		port_ctr = Counter(self.__line)
 		if any(ct > port.get_max_number_of_visit() for port, ct in port_ctr.items()):
-			print("Warning: Invalid since a port is visited more than max allowed number.")
+			if warn:
+				print("Warning: Invalid since a port is visited more than max allowed number.")
 			return False
 		return True
 
@@ -646,4 +649,4 @@ class ServiceLine:
 			else: # idx == len(sequence) - 1
 				if p == sequence[0]:
 					sequence.pop(idx)
-		return ServiceLine(self.name(), [p.get_id() for p in sequence], ports_pool, _test)
+		return ServiceLine(self.name(), sequence, _test)

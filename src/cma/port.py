@@ -3,11 +3,12 @@ port.py
 
 Define all port related classes and methods
 """
-from typing import Tuple
+from typing import Tuple, Literal
 from importlib import resources
 from matplotlib import pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib.axes import Axes
+from matplotlib.lines import Line2D
 from shapely.geometry import Point
 
 import geopandas as gpd
@@ -115,6 +116,9 @@ class PortPool:
 	def __repr__(self) -> str:
 		return str(self.__port_list)
 
+	def update(self, port_list: list[Port]):
+		self.__port_list = port_list
+
 	def tolist_port(self) -> list[Port]:
 		return self.__port_list
 
@@ -122,7 +126,7 @@ class PortPool:
 		return len(self.__port_list)
 
 	def plot(self, selected_countries: list[str],
-				plot_port_id: bool = False) -> Tuple[Figure, Axes, 'PortPool']:
+				plot_port_id: bool=False, display_info=True) -> Tuple[Figure, Axes, 'PortPool']:
 		"""
 		This function input `selected_asia_countries` as a filter and
 		return a filtered new collection of ports that is only contained
@@ -147,13 +151,17 @@ class PortPool:
 			(gdf.geometry.x >= minx) & (gdf.geometry.x <= maxx) &
 			(gdf.geometry.y >= miny) & (gdf.geometry.y <= maxy)
 		]
-		print('In Total ', len(gdf_filtered), ' ports are plotted')
+		if display_info:
+			print('In Total ', len(gdf_filtered), ' ports are plotted')
 		port_list = [self.get_port(id) for id in gdf_filtered['Port']]
 		portpool_filtered = PortPool(port_list)
 		#
 		# Plot the ports
+		region2 = world.cx[minx:maxx, miny:maxy]
 		fig, ax = plt.subplots()
-		region.plot(ax=ax, color='lightgrey', edgecolor='black')
+		ax.set_xlim(minx, maxx)
+		ax.set_ylim(miny, maxy)
+		region2.plot(ax=ax, color='lightgrey', edgecolor='black')
 		gdf_filtered.plot(ax=ax, color='red', markersize = 10)
 		for x, y, label in zip(gdf_filtered.geometry.x, gdf_filtered.geometry.y, gdf_filtered['Port']):
 			if plot_port_id:
@@ -268,16 +276,45 @@ class PortGraph(PortPool):
 		- mutually distance
 	This class is only used in layer 0, the approximation of cost function.
 	"""
-	__mat_distance: np.matrix
-	__mat_demand: np.matrix
+	__mat_distance: np.ndarray
+	__mat_demand: np.ndarray
 
 	def __init__(self, ports_pool: PortPool,
-			mat_distance: list[list[float]] | np.matrix,
-			mat_demand: list[list[float]] | np.matrix):
+			mat_distance: list[list[float]] | np.ndarray,
+			mat_demand: list[list[float]] | np.ndarray,
+			filter_by_demand=True):
+		"""
+		Input:
+			- filter: filter the port pool by demands
+		"""
 		super().__init__(ports_pool.tolist_port())
 		ports_number = self.get_number_of_ports()
-		self.__mat_distance = np.matrix(mat_distance)[:ports_number, :ports_number]
-		self.__mat_demand = np.matrix(mat_demand)[:ports_number, :ports_number]
+		self.__mat_distance = np.array(mat_distance)[:ports_number, :ports_number]
+		self.__mat_demand = np.array(mat_demand)[:ports_number, :ports_number]
+
+		if filter_by_demand:
+			od_pairs = self.get_all_od_pairs()
+			portset = set()
+			for od in od_pairs:
+				o, d = od
+				portset.add(self.get_port_by_idx(o))
+				portset.add(self.get_port_by_idx(d))
+			sub_ports = list(portset)
+			sub_demands = self.get_filtered_demand_matrix(sub_ports)
+			sub_distance = self.get_filtered_distance_matrix(sub_ports)
+			super().update(sub_ports)
+			self.__mat_demand = sub_demands
+			self.__mat_distance = sub_distance
+
+	def get_pairs_missing_distance(self) -> list[tuple[int, int]]:
+		o_arr, d_arr = np.where(np.isinf(self.__mat_distance))
+		pairs = [(o, d) for o, d in zip(o_arr, d_arr)]
+		return pairs
+
+	def get_all_od_pairs(self) -> list[tuple[int, int]]:
+		"""return a list of index tuples (of ports) that represents the OD pair
+		"""
+		return list(zip(*np.where(self.__mat_demand > 0)))
 
 	def get_distance(self, port_i: Port, port_j: Port) -> float:
 		idx_i = self.get_unique_index(port_i)
@@ -292,6 +329,20 @@ class PortGraph(PortPool):
 	def get_distance_by_idx(self, port_i_idx: int, port_j_idx: int) -> float:
 		return self.__mat_distance[port_i_idx][port_j_idx]
 
+	def get_demand_flows(self) -> tuple[np.ndarray, np.ndarray]:
+		"""return:
+			- inflows of each port
+			- outflows of each port
+		"""
+		inflow = np.sum(self.__mat_demand, axis=0)
+		outflow = np.sum(self.__mat_demand, axis=1)
+		return inflow, outflow
+
+	def get_demand(self, port_i: Port, port_j: Port) -> float:
+		idx_i = self.get_unique_index(port_i)
+		idx_j = self.get_unique_index(port_j)
+		return self.__mat_demand[idx_i, idx_j]
+
 	def get_demand_by_id(self, port_i_id: str, port_j_id: str) -> float:
 		idx_i = self.get_unique_index_by_id(port_i_id)
 		idx_j = self.get_unique_index_by_id(port_j_id)
@@ -300,7 +351,62 @@ class PortGraph(PortPool):
 	def get_demand_by_idx(self, port_i_idx: int, port_j_idx: int) -> float:
 		return self.__mat_demand[port_i_idx, port_j_idx]
 
-	def get_all_od_pairs(self) -> list[tuple[int, int]]:
-		"""return a list of index tuples (of ports) that represents the OD pair
-		"""
-		return list(zip(*np.where(self.__mat_demand > 0)))
+	def get_filtered_demand_matrix(self, ports: list[Port]) -> np.ndarray:
+		indeces = [self.get_unique_index(p) for p in ports]
+		return self.__mat_demand[indeces, :][:, indeces]
+
+	def get_filtered_distance_matrix(self, ports: list[Port]) -> np.ndarray:
+		indeces = [self.get_unique_index(p) for p in ports]
+		return self.__mat_distance[indeces, :][:, indeces]
+
+	def filtered_by_sub_portpool(self, sub_portpool: PortPool):
+		indeces: list[int] = []
+		for p in sub_portpool.tolist_port():
+			if self.has_port_by_name(p.get_name()):
+				indeces.append(self.get_unique_index(p))
+		sub_mat_demand = self.__mat_demand[indeces, :][:, indeces]
+		sub_mat_distance = self.__mat_distance[indeces, :][:, indeces]
+		return PortGraph(sub_portpool, sub_mat_distance, sub_mat_demand)
+
+	def plot(self, selected_countries: list[str],
+				plot_port_id: bool=False, display_info=False,
+				demandtype: Literal['in', 'out', 'total']='total',
+				odpairs: bool = True, odpairs_color='red'
+			) -> Tuple[Figure, Axes, 'PortGraph']:
+		# Plot all ports by small red dot
+		fig, ax, portpool = super().plot(selected_countries, plot_port_id, display_info)
+		portgraph = self.filtered_by_sub_portpool(portpool)
+		# Plot the demands of all ports
+		inflows, outflows = portgraph.get_demand_flows()
+		xs, ys = [], []
+		for port in portgraph.tolist_port():
+			x, y = port.get_location()
+			xs.append(x)
+			ys.append(y)
+		match demandtype:
+			case 'in':
+				ax.scatter(xs, ys, s=inflows, alpha=0.5)
+			case 'out':
+				ax.scatter(xs, ys, s=outflows, alpha=0.5)
+			case 'total':
+				ax.scatter(xs, ys, s=inflows + outflows, alpha=0.3)
+		# Plot the connectivity of each od pair
+		if not odpairs:
+			return fig, ax, portgraph
+		od_pairs = portgraph.get_all_od_pairs()
+		for od in od_pairs:
+			o, d = od
+			port_o = portgraph.get_port_by_idx(o)
+			port_d = portgraph.get_port_by_idx(d)
+			port_o_loc = port_o.get_location()
+			port_d_loc = port_d.get_location()
+			arctan_demand = 2 * np.arctan(portgraph.get_demand_by_idx(o, d)) / np.pi
+			line = Line2D(
+				[port_o_loc[0], port_d_loc[0]],
+				[port_o_loc[1], port_d_loc[1]],
+				color=odpairs_color,
+				alpha=0.15 * (arctan_demand)**2,
+				linewidth=arctan_demand**2
+			)
+			ax.add_line(line)
+		return fig, ax, portgraph

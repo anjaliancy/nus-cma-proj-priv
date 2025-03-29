@@ -19,5 +19,7 @@ from .data_reader import \
 		read_sailing_distance_data, \
 		read_current_line_data, \
 		read_demand_data
-from .data_reader import \
-		analysis_weeks
+from .data_reader import create_week_predictor
+from .servicegraph import \
+		update_week_predictor, \
+		apply_prediction

@@ -5,6 +5,7 @@ from importlib import resources
 from .vessel import Vessel, VesselPool
 from .port import Port, PortPool, PortGraph
 from .serviceline import ServiceLine
+from .servicegraph import update_week_predictor
 
 import pandas as pd
 import numpy as np
@@ -123,7 +124,7 @@ def read_port_data() -> Tuple[PortPool, PortPool]:
 
 	return port_pool, PortPool(port_pool_list_complete_info)
 
-def read_sailing_distance_data(portpool: PortPool) -> np.matrix:
+def read_sailing_distance_data(portpool: PortPool) -> np.ndarray:
 	"""input `portpool` to determine the size of distance matrix
 	"""
 	port_mapping = {
@@ -145,7 +146,7 @@ def read_sailing_distance_data(portpool: PortPool) -> np.matrix:
 	np.fill_diagonal(dist_matrix, 0)
 	return np.matrix(dist_matrix)
 
-def read_demand_data(portpool: PortPool) -> tuple[dict, np.matrix]:
+def read_demand_data(portpool: PortPool) -> tuple[dict, np.ndarray]:
 	"""
 	Input:
 		`portpool` to determine the size of demand matrix
@@ -180,7 +181,9 @@ def read_demand_data(portpool: PortPool) -> tuple[dict, np.matrix]:
 		total_demands += demand_day
 	return demands_dict, np.matrix(total_demands)
 
-def read_current_line_data(portpool: PortPool, display = False) -> tuple[list[ServiceLine], list[int]]:
+def read_current_line_data(portpool: PortPool,
+		verbose=False, warn=True
+	) -> tuple[list[ServiceLine], list[int]]:
 	"""input `portpool` as a filter
 	return:
 	- current lines
@@ -205,34 +208,22 @@ def read_current_line_data(portpool: PortPool, display = False) -> tuple[list[Se
 		port_id_list = row['Port ID']
 		sailing_days = row['Time to next port (in day)']
 		staying_days = row['Stay time at port (in day)']
-		total_weeks = (np.sum(sailing_days) + np.sum(staying_days)) / 7.0
+		total_weeks = int(np.round((np.sum(sailing_days) + np.sum(staying_days)) / 7.0))
 		try:
-			line = ServiceLine(line_name, port_id_list, portpool, display=display)
+			port_list = [portpool.get_port(port_id) for port_id in port_id_list]
+			line = ServiceLine(line_name, port_list, verbose=verbose, warn=warn)
 		except:
 			continue
+		line.week = total_weeks
 		current_lines.append(line)
-		current_lines_weeks.append(int(np.round(total_weeks)))
+		current_lines_weeks.append(total_weeks)
 	return current_lines, current_lines_weeks
 
-def analysis_weeks(portgraph: PortGraph):
-	"""Predict how many weeks to complete the route
-
-	input: `portpool` as a filter
-	"""
-	current_lines, current_lines_weeks = read_current_line_data(portgraph)
-	current_lines_id = []
-	current_lines_sailing_distance = []
-	current_lines_stops_number = []
-	for line in current_lines:
-		current_lines_id.append(line.name())
-		sailing_distance = line.get_distance(portgraph)
-		current_lines_sailing_distance.append(sailing_distance)
-		current_lines_stops_number.append(line.number_of_port())
-
-	df = pd.DataFrame({
-		'id': current_lines_id,
-		'weeks': current_lines_weeks,
-		'sailing_distance': current_lines_sailing_distance,
-		'stops_number': current_lines_stops_number
-	})
-	return current_lines, df
+def create_week_predictor():
+	portpool, _ = read_port_data()
+	_, weekly_demand = read_demand_data(portpool)
+	dist_mat = read_sailing_distance_data(portpool)
+	portgraph = PortGraph(portpool, dist_mat, weekly_demand)
+	current_lines, _ = read_current_line_data(portpool, warn=False)
+	model, _ = update_week_predictor(pd.DataFrame(), current_lines, portgraph)
+	return model
