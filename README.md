@@ -8,7 +8,7 @@ This is the code of NUS CMA project
 
 Examples:
 
-- A Smaller Network - Southearstern Asia: [Notebook Version](./src/example_southeasternAsia.ipynb).
+- [A Smaller Network - Southearstern Asia](./src/example_southeasternAsia.ipynb).
 
 Reports:
 

@@ -495,6 +495,7 @@ class MonteCarloTree:
 			the_child = the_node.children[index_child]
 			print(action.explain(portgraph, the_node.graph, idx_action + 1))
 			print(f'Siblings = {len(the_node.children)}')
+			print(f'N visits = {the_child.number_of_visits}')
 			print(f'Original cost = {the_node.graph.total_cost()}')
 			print(f'Updated cost  = {the_child.graph.total_cost()}\n')
 			the_node = the_child
