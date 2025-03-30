@@ -2,6 +2,23 @@
 
 This is the code of NUS CMA project
 
+
+
 ## Documentation
 
-- Example: [A Smaller Network - Southearstern Asia](./src/example_southeasternAsia.ipynb).
+Examples: 
+
+- A Smaller Network - Southearstern Asia: [Notebook Version](./src/example_southeasternAsia.ipynb), [Markdown Version](./docs/example_southeasternAsia/example_southeasternAsia.md).
+
+Reports: 
+
+- [Main report](./docs/_Report.md).
+- Model formulation....(todo)
+- [Literature review](./docs/_Literature_Review.md).
+
+
+
+## To Do
+
+- [Milestones](./docs/_todo-list.md).
+
