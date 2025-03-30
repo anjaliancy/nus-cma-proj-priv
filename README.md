@@ -6,11 +6,11 @@ This is the code of NUS CMA project
 
 ## Documentation
 
-Examples: 
+Examples:
 
-- A Smaller Network - Southearstern Asia: [Notebook Version](./src/example_southeasternAsia.ipynb), [Markdown Version](./docs/example_southeasternAsia/example_southeasternAsia.md).
+- A Smaller Network - Southearstern Asia: [Notebook Version](./src/example_southeasternAsia.ipynb).
 
-Reports: 
+Reports:
 
 - [Main report](./docs/_Report.md).
 - Model formulation....(todo)

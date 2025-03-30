@@ -4,7 +4,6 @@ from importlib import resources
 from .vessel import Vessel, VesselPool
 from .port import Port, PortPool, PortGraph
 from .serviceline import ServiceLine
-from .servicegraph import update_week_predictor
 
 import pandas as pd
 import numpy as np
@@ -220,12 +219,4 @@ def read_current_line_data(portpool: PortPool,
 		current_lines_weeks.append(total_weeks)
 	return current_lines, current_lines_weeks
 
-def create_week_predictor():
-	vesselpool = read_vessel_class_data()
-	portpool, _ = read_port_data()
-	_, weekly_demand = read_demand_data(portpool)
-	dist_mat = read_sailing_distance_data(portpool)
-	portgraph = PortGraph(portpool, dist_mat, weekly_demand)
-	current_lines, _ = read_current_line_data(portpool, warn=False)
-	model, _ = update_week_predictor(pd.DataFrame(), current_lines, portgraph, vesselpool)
-	return model
+

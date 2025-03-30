@@ -11,20 +11,20 @@ import time
 import math
 import bisect
 import cvxpy as cp
+from matplotlib.axes._axes import Axes
+from matplotlib.figure import Figure
 import numpy as np
-import pandas as pd
 import geopandas as gpd
-import statsmodels.api as sm
 
 from statsmodels.regression.linear_model import RegressionResultsWrapper
 from scgraph.geographs.marnet import marnet_geograph  # type: ignore
-from shapely.geometry import LineString, Point
+from shapely.geometry import LineString
 
 from .vessel import VesselPool
 from .port import Port, PortGraph, PortPool
 from .serviceline import ServiceLine, LineAction, Path, Slot, Segment
 from .rl_utils import MatrixAnalyzer
-
+from .utils import apply_prediction
 
 class GraphAction:
 	"""This class defines the class of action that adjust the graph of servicelines
@@ -53,6 +53,9 @@ class GraphAction:
 		# return True
 		return self.idx_line == other.idx_line and self.cmd == other.cmd and self.loc == other.loc
 
+	def get_line_name(self, servicegraph: 'ServiceGraph') -> str:
+		return servicegraph.tolist_serviceLine()[self.idx_line].name()
+
 	def get_line_action(self, serviceline: ServiceLine, portgraph: PortGraph) -> LineAction:
 		return LineAction(self.cmd, self.loc)
 
@@ -73,80 +76,6 @@ class GraphAction:
 			case 'delete':
 				re += f'    Delete Port "{port}" in the two ports "{start}" and "{end}".'
 		return re
-
-# region - Predict Weeks
-#
-def _extract_line(line: ServiceLine, portgraph: PortGraph, vesselpool: VesselPool):
-	"""
-	Make sure that `line` is not empty
-	"""
-	inflows, outflows = portgraph.get_demand_flows()
-	current_lines_sailing_distance = line.get_distance(portgraph)
-	current_lines_stops_number = line.number_of_port()
-	sum_prods = 0
-	sum_inflows = 0
-	sum_outflows = 0
-	for p in line.tolist_port():
-			sum_inflows += inflows[portgraph.get_unique_index(p)]
-			sum_outflows += outflows[portgraph.get_unique_index(p)]
-			sum_prods += sum(p.get_producticity(vesselpool))
-	current_lines_ave_productivity = sum_prods / line.number_of_port()
-	current_lines_ave_demandinflow = sum_inflows / line.number_of_port()
-	current_lines_ave_demandoutflow = sum_outflows / line.number_of_port()
-	return {
-		'const': 1.0,
-		'weeks': line.week,
-		'sailing_distance': current_lines_sailing_distance,
-		'stops_number': current_lines_stops_number,
-		'ave_productivity': current_lines_ave_productivity,
-		'ave_demand_inflows': current_lines_ave_demandinflow,
-		'ave_demand_outflows': current_lines_ave_demandoutflow
-	}
-
-def _extract_lines(lines: list[ServiceLine], portgraph: PortGraph, vesselpool: VesselPool) -> pd.DataFrame:
-	"""
-	Make sure that each line in `lines` is not empty
-	"""
-	df = pd.DataFrame()
-	for line in lines:
-		rec = _extract_line(line, portgraph, vesselpool)
-		df_new = pd.DataFrame([rec])
-		df = pd.concat([df, df_new], ignore_index=True)
-	return df
-
-def update_week_predictor(df: pd.DataFrame, lines: list[ServiceLine],
-		portgraph: PortGraph, vesselpool: VesselPool,
-	) -> tuple[RegressionResultsWrapper, pd.DataFrame]:
-	# update old `df`
-	new_row = _extract_lines(lines, portgraph, vesselpool)
-	df = pd.concat([df, new_row], ignore_index=True)
-	# run OLS
-	xs = df.drop(columns=['weeks'])
-	y = df['weeks']
-	model = sm.OLS(y, xs).fit()
-	return model, df
-
-def apply_prediction(model: RegressionResultsWrapper,
-		lines: list[ServiceLine], portgraph: PortGraph, vesselpool: VesselPool,
-	) -> np.ndarray:
-	predicts = []
-	for line in lines:
-		if line.number_of_port() == 0:
-			predicts.append(0.0)
-			continue
-		df = _extract_lines([line], portgraph, vesselpool)
-		xs = df.drop(columns=['weeks'])
-		predict = model.predict(xs)[0]
-		if predict < 3/4:
-			predict = 1/2
-		elif predict > 9:
-			predict = 9
-		else:
-			predict = round(predict)
-		predicts.append(predict)
-	return np.array(predicts)
-#
-# endregion
 
 class ServiceGraph:
 	"""The graph of the service system
@@ -174,8 +103,8 @@ class ServiceGraph:
 				'odpairs': False,
 				'odpairs_color': 'red'
 			}
-		):
-		_, ax, _ = portgraph.plot(
+		) -> tuple[Figure, Axes]:
+		fig, ax, _ = portgraph.plot(
 				selected_countries,
 				params_background['plot_port_id'],
 				params_background['display_info'],
@@ -209,6 +138,7 @@ class ServiceGraph:
 				label = f'({idx+1}->{line.idx_of_next_idx(idx) + 1}): ' \
 					+ str(p1) + '->' + str(p2)
 				gdf_path.plot(ax=ax, linewidth=2, label = label, color=lines_color[idx_line])
+		return fig, ax
 
 # region - Basic Attributes & Operations ########################################
 #

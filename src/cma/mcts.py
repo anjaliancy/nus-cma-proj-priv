@@ -85,7 +85,7 @@ class MonteCarloTreeSearchNode:
 # Tree structure related
 ###############################################################################
 
-	def action_trace(self) -> list[GraphAction]:
+	def trace_actions(self) -> list[GraphAction]:
 		"""
 		Return:
 			- a list of best actions
@@ -344,8 +344,6 @@ class MonteCarloTreeSearchNode:
 		"""Using the more balanced way of expansion
 		"""
 		c = self.select(c_param)
-		if display:
-			print('Select:', c)
 
 		if c.number_of_visits == 0:
 			c.rollout(portgraph, vesselpool, discount_fac, valid_weight_proportion, week_predictor)
@@ -353,13 +351,13 @@ class MonteCarloTreeSearchNode:
 			if recorder is not None:
 				recorder['num_rollout'] += 1
 				if display:
-					print('rollout')
+					print('Select:', c, 'rollout')
 		else:
 			c.expand(portgraph, vesselpool, max_depth, c_param, discount_fac, valid_weight_proportion, week_predictor)
 			if recorder is not None:
 				recorder['num_expand'] += 1
 				if display:
-					print('expand')
+					print('Select:', c, 'expand')
 
 
 ###############################################################################
@@ -471,15 +469,15 @@ class MonteCarloTree:
 	def total_number_of_nodes(self):
 		return self.root_node.total_number_of_sub_nodes()
 
-	def best_node(self) -> MonteCarloTreeSearchNode:
+	def get_best_node(self) -> MonteCarloTreeSearchNode:
 		return self.root_node.best_sub_node(self.portgraph)
 
-	def best_node_byucb(self, c_param: float=1e-3) -> MonteCarloTreeSearchNode:
+	def get_best_node_byucb(self, c_param: float=1e-3) -> MonteCarloTreeSearchNode:
 		return self.root_node.best_sub_node_byucb(self.portgraph, c_param)
 
-	def best_node_trace(self) -> list['MonteCarloTreeSearchNode']:
+	def get_best_node_trace(self) -> list['MonteCarloTreeSearchNode']:
 		re: list['MonteCarloTreeSearchNode'] = []
-		the_node = self.best_node()
+		the_node = self.get_best_node()
 		re.insert(0, the_node)
 		while the_node.parent is not None:
 			re.insert(0, the_node.parent)
@@ -487,8 +485,8 @@ class MonteCarloTree:
 		return re[1:]
 
 	def display_best_node(self, portgraph: PortGraph):
-		best_node = self.best_node()
-		best_actions = best_node.action_trace()
+		best_node = self.get_best_node()
+		best_actions = best_node.trace_actions()
 
 		print('Best Action Trace:')
 		the_node = self.root_node
