@@ -1,4 +1,3 @@
-import chardet
 from typing import Tuple
 from importlib import resources
 
@@ -53,11 +52,13 @@ def read_vessel_class_data() -> VesselPool:
 def read_port_data() -> Tuple[PortPool, PortPool]:
 	"""
 	return:
-	- A larger pool of ports with some data not complete
-	- Pool of ports whose data are more compete
+	- `port_pool`: A larger pool of ports with some data not complete
+	- `port_pool_finer`: A pool of ports whose data are more compete, with
+		- fit vessel ranks and numbers
+		- portcall cost for each vessel
+		- berth productivity
 	"""
 	port_pool = PortPool()
-	port_pool_list_complete_info = []
 	# 1. port data
 	#
 	file1 = resources.files('cma.res').joinpath(data_file_port)
@@ -78,14 +79,13 @@ def read_port_data() -> Tuple[PortPool, PortPool]:
 			row['Longitude'],
 			row['Latitude'],
 			{},  # fit vessels
-			[],  # port call cost
-			[],  # berth productivity
+			{},  # berth productivity
+			{},  # port call cost
 			transshipment_cost,
 			storage_cost,
 			row['Transhipment Capacity'],
 			row['Max Draft'],
-			row['Max Daily Port Call'],
-			2,  # max number of visit in a line
+			row['Max Daily Port Call']
 		)
 	# 2. port call data (filter)
 	#
@@ -94,35 +94,36 @@ def read_port_data() -> Tuple[PortPool, PortPool]:
 	df_port_call_2 = pd.read_excel(file2, sheet_name = 'Sheet2')  # read first table
 	df_port_call_1 = df_port_call_1.rename(columns=lambda x: x.strip())  # trim titles
 	df_port_call_2 = df_port_call_2.rename(columns=lambda x: x.strip())  # trim titles
+	port_pool_finer = []
 
 	# read sheet 1 data
 	for _, row in df_port_call_1.iterrows():
 		port_id = row['Port Code']
 		try:
-			port = port_pool.get_port(port_id)
+			port = port_pool.get_port(port_id)  # port is in `port_pool`
 		except:
 			continue
 		distinct_vessel_count = row['Distinct Vessel Count']
-		if np.isnan(distinct_vessel_count):
+		if np.isnan(distinct_vessel_count):  # for missing data
 			distinct_vessel_count = 99999
-		port.fit_vessel_ranks[row['VC_Rank']] = int(distinct_vessel_count)
-		port.cost_call.append(row['Ave Port Call Cost'])
-		port.berth_productivity.append(row['Gross Berth Productivity (mph)_avg'])
-		if port not in port_pool_list_complete_info:
-			port_pool_list_complete_info.append(port)
+		port.fit_vessel_ranks[row['VC_Rank']] = distinct_vessel_count
+		port.cost_portcall[row['VC_Rank']] = row['Ave Port Call Cost']
+		port.berth_productivity[row['VC_Rank']] = row['Gross Berth Productivity (mph)_avg']
+		if port not in port_pool_finer:
+			port_pool_finer.append(port)
 	# read sheet 2 data
 	for _, row in df_port_call_2.iterrows():
 		port_id = row['Port Code']
 		try:
-			port = port_pool.get_port(port_id)
+			port = port_pool.get_port(port_id)  # port is in `port_pool`
 		except:
 			continue
-		if port in port_pool_list_complete_info:
-			if row['VC_Rank'] not in port.fit_vessel_ranks:
-				port.fit_vessel_ranks[row['VC_Rank']] = 99999
-				port.cost_call.append(row['Ave Port Call Cost'])
+		if port in port_pool_finer:             # port is also in `port_pool_finer`
+			port.fit_vessel_ranks[row['VC_Rank']] = 99999
+			if isinstance(row['Ave Port Call Cost'], float):
+				port.cost_portcall[row['VC_Rank']] = row['Ave Port Call Cost']
 
-	return port_pool, PortPool(port_pool_list_complete_info)
+	return port_pool, PortPool(port_pool_finer)
 
 def read_sailing_distance_data(portpool: PortPool) -> np.ndarray:
 	"""input `portpool` to determine the size of distance matrix
@@ -220,10 +221,11 @@ def read_current_line_data(portpool: PortPool,
 	return current_lines, current_lines_weeks
 
 def create_week_predictor():
+	vesselpool = read_vessel_class_data()
 	portpool, _ = read_port_data()
 	_, weekly_demand = read_demand_data(portpool)
 	dist_mat = read_sailing_distance_data(portpool)
 	portgraph = PortGraph(portpool, dist_mat, weekly_demand)
 	current_lines, _ = read_current_line_data(portpool, warn=False)
-	model, _ = update_week_predictor(pd.DataFrame(), current_lines, portgraph)
+	model, _ = update_week_predictor(pd.DataFrame(), current_lines, portgraph, vesselpool)
 	return model

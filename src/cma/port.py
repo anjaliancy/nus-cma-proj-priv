@@ -31,31 +31,38 @@ class Port:
 	__name: str
 	__longitude: float
 	__latitude: float
-	__n_visit: int
 
-	max_draft: float
-	max_daily_call: int
-	fit_vessel_ranks: dict[int, float]  # this is not an explicit constraint but more a data limitation constraint
-	berth_productivity: list[float]
-	cost_call: list[float]
+	fit_vessel_ranks: dict[int, int]  # this is not an explicit constraint but more a data limitation constraint
+	berth_productivity: dict[int, float]
+	cost_portcall: dict[int, float]
 	cost_transship: float
 	cost_storage: float
 	transshipment_capacity: bool
+	max_draft: float
+	max_daily_call: int
+	max_line_visit: int
 
 	def __init__(self, port_id: str, name: str, longitude: float, latitude: float,
-					fit_vessel_ranks: dict[int, float], cost_call: list[float], berth_productivity: list[float],
-					cost_transship: float, cost_storage: float, transshipment_capacity: bool,
-					max_draft: float, max_daily_call: int, number_of_visit: int):
+			fit_vessel_ranks: dict[int, int],      # vessel rank : number
+			berth_productivity: dict[int, float],  # vessel rank : productivity
+			cost_portcall: dict[int, float],       # vessel rank : average cost
+			cost_transship: float,                 #
+			cost_storage: float,                   #
+			transshipment_capacity: bool,          #
+			max_draft: float,                      #
+			max_daily_call: int,                   #
+			max_line_visit: int=2                  # max number of visits for each line
+	):
 		self.__id = port_id
 		self.__name = name
 		self.__longitude = longitude
 		self.__latitude = latitude
-		self.__n_visit = number_of_visit  # max number of visit in a line
+		self.max_line_visit = max_line_visit
 		self.max_draft = max_draft
 		self.max_daily_call = max_daily_call
 		self.fit_vessel_ranks = fit_vessel_ranks
 		self.berth_productivity = berth_productivity
-		self.cost_call = cost_call
+		self.cost_portcall = cost_portcall
 		self.cost_transship = cost_transship
 		self.cost_storage = cost_storage
 		self.transshipment_capacity = transshipment_capacity
@@ -73,31 +80,35 @@ class Port:
 		return self.__longitude, self.__latitude
 
 	def get_max_number_of_visit(self) -> int:
-		return self.__n_visit
+		return self.max_line_visit
 
 	def get_producticity(self, vesselpool: VesselPool) -> list[float]:
 		"""
+		Input: all vessels
+
 		Productivity for each vessel type
 		"""
-		re = []
-		for vessel in vesselpool.vessels_list:
-			if vessel.vessel_rank in self.fit_vessel_ranks:
-				re.append(self.fit_vessel_ranks[vessel.vessel_rank])
-			else:
-				re.append(0)
-		return re
+		n_vessel_ranks = vesselpool.get_number_of_types()
+		productivities = [0.0 for _ in range(n_vessel_ranks)]
+		for vclass, prod in self.berth_productivity.items():
+			if vclass <= n_vessel_ranks:
+				productivities[vclass - 1] = prod
+		return productivities
 
-	def get_port_call_costs(self, vesselpool: VesselPool) -> list[float]:
+	def get_portcall_costs(self, vesselpool: VesselPool) -> list[float]:
 		"""
 		Input: all vessels
 
 		Return: a list of port call cost of each vessel
+
+		Note: `infty` for unavailable ship types
 		"""
-		n_vessel_types = vesselpool.get_number_of_types()
-		pc_costs = [float('inf') for _ in range(n_vessel_types)]
-		for vclass, pc_cost in self.fit_vessel_ranks.items():
-			pc_costs[vclass - 1] = pc_cost
-		return pc_costs
+		n_vessel_ranks = vesselpool.get_number_of_types()
+		portcall_costs = [2e4 for _ in range(n_vessel_ranks)]
+		for vclass, portcall_cost in self.cost_portcall.items():
+			if vclass <= n_vessel_ranks:
+				portcall_costs[vclass - 1] = portcall_cost
+		return portcall_costs
 
 	def check_is_vessel_fit(self, v_rank: int) -> bool:
 		return v_rank in self.fit_vessel_ranks
@@ -126,7 +137,8 @@ class PortPool:
 		return len(self.__port_list)
 
 	def plot(self, selected_countries: list[str],
-				plot_port_id: bool=False, display_info=True) -> Tuple[Figure, Axes, 'PortPool']:
+			plot_port_id: bool=False, display_info=True
+		) -> Tuple[Figure, Axes, 'PortPool']:
 		"""
 		This function input `selected_asia_countries` as a filter and
 		return a filtered new collection of ports that is only contained
@@ -217,17 +229,30 @@ class PortPool:
 		return False
 
 	def add_port(self, port_id: str, name: str, longitude: float, latitude: float,
-					fit_vessel_ranks: dict, cost_call: list[float], berth_productivity: list[float],
-					cost_transship: float, cost_storage: float, transshipment_capacity: bool,
-					max_draft: float, max_daily_call: int, number_of_visit: int):
+			fit_vessel_ranks: dict[int, int],
+			berth_productivity: dict[int, float],
+			cost_portcall: dict[int, float],
+			cost_transship: float,
+			cost_storage: float,
+			transshipment_capacity: bool,
+			max_draft: float,
+			max_daily_call: int,
+			max_line_visit: int=2
+		):
 		if self.has_port_by_id(port_id):
 			return
 		self.__port_list.append(
 			Port(
 				port_id, name, longitude, latitude,
-				fit_vessel_ranks, cost_call, berth_productivity,
-				cost_transship, cost_storage, transshipment_capacity,
-				max_draft, max_daily_call, number_of_visit
+				fit_vessel_ranks,
+				berth_productivity,
+				cost_portcall,
+				cost_transship,
+				cost_storage,
+				transshipment_capacity,
+				max_draft,
+				max_daily_call,
+				max_line_visit
 			)
 		)
 

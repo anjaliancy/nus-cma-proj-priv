@@ -76,7 +76,7 @@ class GraphAction:
 
 # region - Predict Weeks
 #
-def _extract_line(line: ServiceLine, portgraph: PortGraph):
+def _extract_line(line: ServiceLine, portgraph: PortGraph, vesselpool: VesselPool):
 	"""
 	Make sure that `line` is not empty
 	"""
@@ -89,7 +89,7 @@ def _extract_line(line: ServiceLine, portgraph: PortGraph):
 	for p in line.tolist_port():
 			sum_inflows += inflows[portgraph.get_unique_index(p)]
 			sum_outflows += outflows[portgraph.get_unique_index(p)]
-			sum_prods += sum(p.berth_productivity)
+			sum_prods += sum(p.get_producticity(vesselpool))
 	current_lines_ave_productivity = sum_prods / line.number_of_port()
 	current_lines_ave_demandinflow = sum_inflows / line.number_of_port()
 	current_lines_ave_demandoutflow = sum_outflows / line.number_of_port()
@@ -103,21 +103,22 @@ def _extract_line(line: ServiceLine, portgraph: PortGraph):
 		'ave_demand_outflows': current_lines_ave_demandoutflow
 	}
 
-def _extract_lines(lines: list[ServiceLine], portgraph: PortGraph) -> pd.DataFrame:
+def _extract_lines(lines: list[ServiceLine], portgraph: PortGraph, vesselpool: VesselPool) -> pd.DataFrame:
 	"""
 	Make sure that each line in `lines` is not empty
 	"""
 	df = pd.DataFrame()
 	for line in lines:
-		rec = _extract_line(line, portgraph)
+		rec = _extract_line(line, portgraph, vesselpool)
 		df_new = pd.DataFrame([rec])
 		df = pd.concat([df, df_new], ignore_index=True)
 	return df
 
-def update_week_predictor(df: pd.DataFrame, lines: list[ServiceLine], portgraph: PortGraph
-						) -> tuple[RegressionResultsWrapper, pd.DataFrame]:
+def update_week_predictor(df: pd.DataFrame, lines: list[ServiceLine],
+		portgraph: PortGraph, vesselpool: VesselPool,
+	) -> tuple[RegressionResultsWrapper, pd.DataFrame]:
 	# update old `df`
-	new_row = _extract_lines(lines, portgraph)
+	new_row = _extract_lines(lines, portgraph, vesselpool)
 	df = pd.concat([df, new_row], ignore_index=True)
 	# run OLS
 	xs = df.drop(columns=['weeks'])
@@ -126,14 +127,14 @@ def update_week_predictor(df: pd.DataFrame, lines: list[ServiceLine], portgraph:
 	return model, df
 
 def apply_prediction(model: RegressionResultsWrapper,
-		lines: list[ServiceLine], portgraph: PortGraph,
+		lines: list[ServiceLine], portgraph: PortGraph, vesselpool: VesselPool,
 	) -> np.ndarray:
 	predicts = []
 	for line in lines:
 		if line.number_of_port() == 0:
 			predicts.append(0.0)
 			continue
-		df = _extract_lines([line], portgraph)
+		df = _extract_lines([line], portgraph, vesselpool)
 		xs = df.drop(columns=['weeks'])
 		predict = model.predict(xs)[0]
 		if predict < 3/4:
@@ -415,10 +416,11 @@ class ServiceGraph:
 # region Key method: solve the minimum cost #####################################
 #
 	def solve_approximated_cost(self, portgraph: PortGraph, vesselpool: VesselPool,
-			week_levels = (1/2, 1, 2, 3, 4, 5, 6, 7, 8, 9),  # <= 5
 			week_predictor: None | RegressionResultsWrapper = None,
+			week_levels = (1/2, 1, 2, 3, 4, 5, 6, 7, 8, 9),  # <= 5
 			tuneparams_1={
 				'unfulfilled_demand_panelty': 1e3,
+				'batch_size': 10000
 			},
 			tuneparams_2={
 				'turnon-transship_shipclass_restriction': 0, # making the algorithm slow
@@ -428,7 +430,8 @@ class ServiceGraph:
 				'BigM-transship': 10000,
 				'BigM-n_ships' : 2,  # at most 2 ships of the same type
 				'BigM-saildays': 64,  # at most 9 weeks, hence less than 64 days
-				'BigM-line_capacity': 30000  # at most 2 ships, with the largest capacity 14810
+				'BigM-line_capacity': 30000,  # at most 2 ships, with the largest capacity 14810
+				'BigM-portcall_cost': 2e9     # unavailable dummy is 1e6, at most 200 calls in a line
 			}
 		):
 		"""To Do...
@@ -472,16 +475,17 @@ class ServiceGraph:
 			od_pair_paths: list[list[Path]],
 			portgraph: PortGraph,
 			vesselpool: VesselPool,
-			week_levels = (1/2, 1, 2, 3, 4, 5, 6, 7, 8, 9),  # <= 5
+			week_levels: list[float]=[1/2, 1, 2, 3, 4, 5, 6, 7, 8, 9],  # <= 5
 			tuneparams: dict[str, float] = {
 				'turnon-transship_shipclass_restriction': 0, # making the algorithm slow
 				'turnon-vessel_speed_optimization': 0,       # making the algorithm super slow
 				'ctrparam-kts_buffer': 0,
 				'ctrparam-transship_A': 100,
 				'BigM-transship': 10000,
-				'BigM-n_ships' : 2,  # at most 2 ships of the same type
-				'BigM-saildays': 64,  # at most 9 weeks, hence less than 64 days
-				'BigM-line_capacity': 30000  # at most 2 ships, with the largest capacity 14810
+				'BigM-n_ships' : 2,           # at most 2 ships of the same type
+				'BigM-saildays': 64,          # at most 9 weeks, hence less than 64 days
+				'BigM-line_capacity': 30000,  # at most 2 ships, with the largest capacity 14810
+				'BigM-portcall_cost': 2e9     # unavailable dummy is 2e6, at most 1000 calls in a line
 			}
 		) -> dict:
 		"""
@@ -492,7 +496,7 @@ class ServiceGraph:
 		- Weekly Demand Flow: `X_{ OD_pair, path }`
 		- Weekly Line Flow  : `Y_{ line, edge }`
 		- Vessel Number     : `V_{ line, rank }`   - integer
-		- Weeks             : `N_{ line, k }`    - binary
+		- Weeks             : `N_{ line, k }`      - binary
 
 		2. Middle Expressions
 
@@ -600,7 +604,43 @@ class ServiceGraph:
 
 		4) Weekly Port-call Cost
 
-		For each `port`...
+		From the data, we have the average portcall cost in each port for each type of ship.
+		Then, the weekly portcall cost for each line is
+
+			sum_{p,k} V_{line, r} @ C_{p,r} * N_{line, k} / k
+
+		where `k` is week, `r` is ship rank and `C_{p,r}` is the portcall cost of the port
+		`p` and ship rank `r`, which is a known parameter.
+
+		This is also a nonlinear expression, hence, we resort to big M's method: Let
+
+			W_{r, k} = C * N_{line, k} and C = V_{line, r} @ C_{p,r}
+
+		The linear constraints that can equivalently express the auxiliary variable `W` are
+
+			W_{r, k} >= M * N_{line, k}
+			W_{r, k} <= -M * N_{line, k}
+			W_{r, k} >= C + M * (1 - N_{line, k})
+			W_{r, k} <= C - M * (1 - N_{line, k})
+
+		4. Other Constraints
+
+		1) Demand fulfillment: Weekly Demand <= Weekly Demand Flow for each od pair
+
+			D_{od} <= sum_{p} X_{od,p}
+
+		2) Flow transform: Weekly Line Demand Flow <= Weekly Edge Flow
+
+			sum_{p has (i,j)} X_{o, d, p} <= sum_{T} Y_{T, seg}
+
+		3) Line capacity constraint:  Weekly Line Flow <= Weekly Line Capacity
+
+			Y_{line, seg} <= C_{ line } / week_line
+
+		This is also a nonlinear constraint, and we have to resort to big M's
+		techniche. Please refer to the code for the implementation.
+
+		END.
 		"""
 		constraints = []
 		obj_expr = 0.0
@@ -789,10 +829,23 @@ class ServiceGraph:
 					constraints.append(aux_W_speedsaildays[idx_kts] >= line_sailing_days - bigM_saildays * (1 - z_kts))
 
 		# 4. Weekly Port Call Cost
-		# for port in line.tolist_port():
-		# 	portcall_cost_rate = port.get_port_call_costs(vesselpool)
-		# 	for idx_V, V in enumerate(ships_of_serviceline):
-		# 		obj_expr += V * portcall_cost_rate[idx_V] / weeks[idx_line]
+		for idx_line, line in enumerate(self.__lines_list):
+			aux_portcall_weeks = cp.Variable(shape=len(week_levels))
+			obj_expr += aux_portcall_weeks @ [1 / k for k in week_levels]
+
+			# express `aux_portcall_weeks := line_portcall_cost * line_weeks`
+			line_weeks = week_vars[idx_line]     # binaries, one-hot
+			line_ships = ship_vars[idx_line, :]  # how many ships in each class
+			line_portcall_cost = 0               # total portcall cost of the line
+			for port in line.tolist_port():
+				portcall_cost_rates = port.get_portcall_costs(vesselpool)
+				line_portcall_cost += line_ships @ portcall_cost_rates
+
+			bigM_portcall = tuneparams['BigM-portcall_cost']
+			constraints.append(aux_portcall_weeks <= bigM_portcall * line_weeks)
+			constraints.append(aux_portcall_weeks >= -bigM_portcall * line_weeks)
+			constraints.append(aux_portcall_weeks <= line_portcall_cost + bigM_portcall * (1 - line_weeks))
+			constraints.append(aux_portcall_weeks >= line_portcall_cost - bigM_portcall * (1 - line_weeks))
 		#
 		# endregion
 
@@ -865,7 +918,7 @@ class ServiceGraph:
 		n_vessel_class = len(vesselpool.vessels_list)
 
 		# predict weeks
-		week_vars = apply_prediction(model, self.__lines_list, portgraph)
+		week_vars = apply_prediction(model, self.__lines_list, portgraph, vesselpool)
 
 		# region Key Variables
 		#
@@ -970,16 +1023,13 @@ class ServiceGraph:
 		ports_prods = [port.get_producticity(vesselpool) for port in portgraph.tolist_port()]
 		ports_gross_prod = [sum(prods) for prods in ports_prods]
 		# 3) Port staying days per week for each line (row) and each port (rolumn)
-		matrix_stay_days = np.array([[0 for _ in portgraph.tolist_port()]for _ in self.__lines_list], dtype=object)
+		matrix_stay_days = np.array([[0 for _ in portgraph.tolist_port()] for _ in self.__lines_list], dtype=object)
 
 		for idx_line in range(n_lines):
 			matrix_stay_days[idx_line, :] = transshipments[idx_line, :] / ports_gross_prod / 24
 			obj_expr += matrix_stay_days[idx_line, :] @ ports_costs_transsip
 
 		# 3. Weekly Bunkering Cost
-		daily_bunkering_cost_rates, speed_level0 = vesselpool.get_bukering_costs()  # shape = (rank, speed)
-		n_speed_level = daily_bunkering_cost_rates.shape[1]
-		KTS_levels = np.arange(speed_level0, speed_level0 + n_speed_level)
 		list_saildays = []
 
 		for idx_line, line in enumerate(self.__lines_list):
@@ -990,10 +1040,13 @@ class ServiceGraph:
 			obj_expr += 7 * line_ship_vars @ vesselpool.get_bukering_cost_middle()
 
 		# 4. Weekly Port Call Cost
-		# for port in line.tolist_port():
-		# 	portcall_cost_rate = port.get_port_call_costs(vesselpool)
-		# 	for idx_V, V in enumerate(ships_of_serviceline):
-		# 		obj_expr += V * portcall_cost_rate[idx_V] / weeks[idx_line]
+		for idx_line, line in enumerate(self.__lines_list):
+			line_ships = ship_vars[idx_line, :]  # how many ships in each class
+			line_portcall_cost = 0               # total portcall cost of the line
+			for port in line.tolist_port():
+				portcall_cost_rates = port.get_portcall_costs(vesselpool)
+				line_portcall_cost += line_ships @ portcall_cost_rates
+			obj_expr += line_portcall_cost / week_vars[idx_line]
 		#
 		# endregion
 
