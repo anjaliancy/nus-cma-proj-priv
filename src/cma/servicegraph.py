@@ -835,7 +835,8 @@ class ServiceGraph:
 			od_pair_paths: list[list[Path]],
 			portgraph: PortGraph,
 			vesselpool: VesselPool,
-			model: RegressionResultsWrapper
+			model: RegressionResultsWrapper,
+			max_transit_time: int = 7
 		):
 		"""This is a simplified version of the subroutine `fulfill_demands`
 
@@ -849,6 +850,10 @@ class ServiceGraph:
 
 		# predict weeks
 		week_vars = apply_prediction(model, self.__lines_list, portgraph, vesselpool)
+
+		for week in week_vars:
+			if week > max_transit_time:
+				return { 'total cost': np.inf }
 
 		# region Key Variables
 		#
