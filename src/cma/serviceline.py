@@ -394,7 +394,7 @@ class ServiceLine:
 	def prev_port_of_idx(self, idx: int) -> Port:
 		return self.__line[self.idx_of_prev_idx(idx)]
 
-	def plot(self, selected_countries: list[str], fig_size = (15, 9), eps = 2):
+	def plot(self, selected_countries: list[str], fig_size = (15, 9), eps = 2, center_pacific=False):
 		"""Plot the service line
 		"""
 		MAP_FILE_PATH = '110m_cultural/ne_110m_admin_0_countries.shp'

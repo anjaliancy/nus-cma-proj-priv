@@ -120,7 +120,7 @@ def create_week_predictor():
 	portpool, _ = read_port_data()
 	_, weekly_demand = read_demand_data(portpool)
 	dist_mat = read_sailing_distance_data(portpool)
-	portgraph = PortGraph(portpool, dist_mat, weekly_demand)
+	portgraph = PortGraph(portpool, dist_mat, weekly_demand, None)
 	current_lines, _ = read_current_line_data(portpool, warn=False)
 	model, _ = update_week_predictor(pd.DataFrame(), current_lines, portgraph, vesselpool)
 	return model

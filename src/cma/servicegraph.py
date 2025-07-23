@@ -82,10 +82,12 @@ class ServiceGraph:
 	"""
 	__lines_list: list[ServiceLine]
 	__total_cost: float
+	__total_profit: float
 
 	def __init__(self, services: list[ServiceLine]):
 		self.__lines_list = services
 		self.__total_cost = math.inf
+		self.__total_profit = 0.0
 
 	def __repr__(self) -> str:
 		# re = ''
@@ -144,6 +146,9 @@ class ServiceGraph:
 #
 	def total_cost(self) -> float:
 		return self.__total_cost
+
+	def total_profit(self) -> float:
+		return self.__total_profit
 
 	def tolist_serviceLine(self) -> list[ServiceLine]:
 		return self.__lines_list
@@ -345,8 +350,9 @@ class ServiceGraph:
 
 # region Key method: solve the minimum cost #####################################
 #
-	def solve_approximated_cost(self, portgraph: PortGraph, vesselpool: VesselPool,
+	def solve_approximated(self, portgraph: PortGraph, vesselpool: VesselPool,
 			week_predictor: None | RegressionResultsWrapper = None,
+			min_cost: bool = True,
 			week_levels = (1/2, 1, 2, 3, 4, 5, 6, 7, 8, 9),  # <= 5
 			tuneparams_1={
 				'unfulfilled_demand_panelty': 1e3,
@@ -374,31 +380,44 @@ class ServiceGraph:
 		unconnected = od_pairs_dict['unconnected']
 		unconnected_demand = od_pairs_dict['unconnected_demand']
 
-		# tune
-		if len(unconnected) > 0:
-			self.__total_cost = sum(unconnected_demand) * tuneparams_1['unfulfilled_demand_panelty']
+		if min_cost:
+			# tune
+			if len(unconnected) > 0:
+				self.__total_cost = sum(unconnected_demand) * tuneparams_1['unfulfilled_demand_panelty']
+			else:
+				self.__total_cost = 0
+			# TO DO:
+			# divide the whole  `od_pairs` into several batches,
+			# then solve the cargo allocation batch by batch
+			if week_predictor is None:
+				sol = self.fulfill_demands(
+					od_pairs,
+					od_pairs_paths,
+					portgraph,
+					vesselpool,
+					week_levels,
+					tuneparams_2)
+				self.__total_cost += sol['total cost']
+			else:
+				sol = self.fulfill_demands_2(
+					od_pairs,
+					od_pairs_paths,
+					portgraph,
+					vesselpool,
+					week_predictor)
+				self.__total_cost += sol['total cost']
 		else:
-			self.__total_cost = 0
-		# TO DO:
-		# divide the whole  `od_pairs` into several batches,
-		# then solve the cargo allocation batch by batch
-		if week_predictor is None:
-			sol = self.fulfill_demands(
-				od_pairs,
-				od_pairs_paths,
-				portgraph,
-				vesselpool,
-				week_levels,
-				tuneparams_2)
-			self.__total_cost += sol['total cost']
-		else:
-			sol = self.fulfill_demands_2(
-				od_pairs,
-				od_pairs_paths,
-				portgraph,
-				vesselpool,
-				week_predictor)
-			self.__total_cost += sol['total cost']
+			if week_predictor is None:
+				pass
+			else:
+				print('>>> hello')
+				sol = self.optimize_profit(
+					od_pairs,
+					od_pairs_paths,
+					portgraph,
+					vesselpool,
+					week_predictor)
+				self.__total_profit = sol['total profit']
 
 	def fulfill_demands(self,
 			od_pairs: list[tuple[int, int]],
@@ -1026,6 +1045,211 @@ class ServiceGraph:
 			'port staying days': matrix_stay_days,
 			'line sailing days': list_saildays,
 		}
+
+	def optimize_profit(self,
+			od_pairs: list[tuple[int, int]],
+			od_pair_paths: list[list[Path]],
+			portgraph: PortGraph,
+			vesselpool: VesselPool,
+			model: RegressionResultsWrapper,
+			max_transit_time: int = 7
+	):
+		"""
+		"""
+		constraints = []
+		obj_expr = 0.0
+
+		n_lines = len(self.__lines_list)
+		n_vessel_class = len(vesselpool.vessels_list)
+
+		# predict weeks
+		week_vars = apply_prediction(model, self.__lines_list, portgraph, vesselpool)
+
+		for week in week_vars:
+			if week > max_transit_time:
+				return { 'total profit': 0.0 }
+
+		# region Key Variables
+		#
+		# (1) Create Weekly Demand Flow
+		#     X_{od,p} = list[ X_{od} ] where X_{od} = list[ X_{od,p} ]
+		demand_vars = []
+		for od, paths_od in zip(od_pairs, od_pair_paths):
+			demand_vars.append([])
+			for idx_path, _ in enumerate(paths_od):
+				demand_vars[-1].append(cp.Variable(name=f'X_{(int(od[0]), int(od[1]), idx_path)}', nonneg=True))
+
+		# (2) Create Weekly Lines Flow
+		#     Y_{ line, seg } = list[ Y_line ] where Y_line = list[ Y_{line, seg} ]
+		flow_vars = []
+		for line in self.__lines_list:
+			flow_vars.append([])
+			for slot in line.tolist_slot():
+				flow_vars[-1].append(cp.Variable(name=f'y_({line.name(), slot.get_segment()})', nonneg=True))
+
+		# (3) Create Number of Vessels for Each Line
+		#     V_{ line, rank }
+		ship_vars = cp.Variable(shape=(n_lines, n_vessel_class), name='V', integer=True)
+		constraints.append(ship_vars >= 0)
+		#
+		# endregion
+
+		# region Middle Expressions
+		def add_ele_to_counts_dict(dict_key: str, dict_val: int | cp.Expression, counts_dict: dict):
+			if dict_key not in counts_dict:
+				counts_dict[dict_key] = dict_val
+			else:
+				counts_dict[dict_key] += dict_val
+
+		# Weekly Transshipment & Weekly Segment Demand Flow
+		transshipments = np.array([
+			[0 for _ in portgraph.tolist_port()]
+				for _ in self.__lines_list], dtype=object)
+		# >> `transship_amounts`: all demand of each port for each line
+		#     - row     = lines
+		#     - columns = ports
+		seg_demand_flows: dict[str, cp.Expression] = {}
+		# >> `seg_demand_flows`: all demand of each segment
+		#     - key   = segment (od)
+		#     - value = sum_{od} X_{od, p}
+		for demand_vars_od, od, od_paths in zip(demand_vars, od_pairs, od_pair_paths):
+			for idx_path, p in enumerate(od_paths):
+				x_od_p = demand_vars_od[idx_path]
+				# 1. there are loading/unloading at `o`, `d` ports
+				first_line = p.get_first_service_line()
+				last_line = p.get_last_service_line()
+				first_idx_line = self.__lines_list.index(first_line)
+				last_idx_line = self.__lines_list.index(last_line)
+				transshipments[first_idx_line, od[0]] += x_od_p
+				transshipments[last_idx_line, od[1]] += x_od_p
+				service_line_old = None
+				for slot in p.tolist_slot():
+					slot_service = slot.get_service()
+					if service_line_old is None:
+						service_line_old = slot_service
+					else:
+						# 2. there is transshipment at port_1
+						if slot.get_service() != service_line_old:
+							old_service_idx = self.__lines_list.index(service_line_old)
+							new_service_idx = self.__lines_list.index(slot_service)
+							port_1 = slot.get_start()
+							port_1_idx = portgraph.get_unique_index(port_1)
+							transshipments[old_service_idx, port_1_idx] += x_od_p
+							transshipments[new_service_idx, port_1_idx] += x_od_p
+					# 3. add demand flow to segment
+					seg = slot.get_segment()
+					add_ele_to_counts_dict(str(seg), x_od_p, seg_demand_flows)
+
+		# Weekly Segment Flow
+		seg_flows: dict[str, cp.Expression] = {}
+		# >> `seg_flows`: all flow of each segment
+		#     - key   = segment (i, j)
+		#     - value = sum_{i,j} Y_{p, i, j}
+		for y_T, line in zip(flow_vars, self.__lines_list):
+			for idx_line, slot in enumerate(line.tolist_slot()):
+				seg = slot.get_segment()
+				add_ele_to_counts_dict(str(seg), y_T[idx_line], seg_flows)
+
+		# Path Distance `M_{ od, path }`
+		all_paths_distance: list[list[float]] = []
+		for od_paths in od_pair_paths:
+			od_paths_distances: list[float] = []
+			for path in od_paths:
+				od_paths_distances.append(path.get_distance(portgraph))
+			all_paths_distance.append(od_paths_distances)
+		#
+		# endregion
+
+		# region Objective
+		# 1. Weekly Chartering Cost
+		daily_charter_costs = vesselpool.get_chartering_costs()
+		obj_expr += 7 * cp.sum(ship_vars @ daily_charter_costs)
+
+		# 2. Weekly Transshipment Cost
+		# 1) transshipment cost per hour for each port
+		ports_costs_transsip = [port.cost_transship for port in portgraph.tolist_port()]
+		# 2) hour productivity of each port
+		ports_prods = [port.get_producticity(vesselpool) for port in portgraph.tolist_port()]
+		ports_gross_prod = [sum(prods) for prods in ports_prods]
+		# 3) Port staying days per week for each line (row) and each port (rolumn)
+		matrix_stay_days = np.array([[0 for _ in portgraph.tolist_port()] for _ in self.__lines_list], dtype=object)
+
+		for idx_line in range(n_lines):
+			matrix_stay_days[idx_line, :] = transshipments[idx_line, :] / ports_gross_prod / 24
+			obj_expr += matrix_stay_days[idx_line, :] @ ports_costs_transsip
+
+		# 3. Weekly Bunkering Cost
+		list_saildays = []
+
+		for idx_line, line in enumerate(self.__lines_list):
+			line_ship_vars = ship_vars[idx_line, :]   # shape = (rank,)
+			line_port_stay_days = np.sum(matrix_stay_days[idx_line, :])
+			line_sailing_days = 7 * week_vars[idx_line] - line_port_stay_days
+			list_saildays.append(line_sailing_days)
+			obj_expr += 7 * line_ship_vars @ vesselpool.get_bukering_cost_middle()
+
+		# 4. Weekly Port Call Cost
+		for idx_line, line in enumerate(self.__lines_list):
+			line_ships = ship_vars[idx_line, :]  # how many ships in each class
+			line_portcall_cost = 0               # total portcall cost of the line
+			for port in line.tolist_port():
+				portcall_cost_rates = port.get_portcall_costs(vesselpool)
+				line_portcall_cost += line_ships @ portcall_cost_rates
+			obj_expr += line_portcall_cost / week_vars[idx_line]
+
+		# 5. Revenue
+		for demand_vars_od, pair_od in zip(demand_vars, od_pairs):
+			unit_revenue_od = portgraph.get_unit_revenue_by_idx(*pair_od)
+			assert unit_revenue_od is not None
+			demand_od_fulfill = 0
+			for x_od_p in demand_vars_od:
+				demand_od_fulfill += x_od_p
+			obj_expr -= unit_revenue_od * demand_od_fulfill
+		#
+		# endregion
+
+		# region Key Constraints
+		# Constraint: (Weekly Demand Flow) sum X_{odp} >= (Weekly Demand) D_{od}
+		# for pair_od, demand_vars_od in zip(od_pairs, demand_vars):
+		# 	demand_od = portgraph.get_demand_by_idx(pair_od[0], pair_od[1])
+		# 	demand_od_fulfill = 0
+		# 	for x_od_p in demand_vars_od:
+		# 		demand_od_fulfill += x_od_p
+		# 	constraints.append(demand_od_fulfill >= demand_od)
+
+		# Constraint: (Weekly Edge Flow) sum_T Y_{T, i, j} >= (Weekly Line Demand Flow) sum_{p has (i,j)} X_{o, d, p}
+		for seg_id, seg_demand_flow in seg_demand_flows.items():
+			constraints.append(seg_flows[seg_id] >= seg_demand_flow)
+
+		# Constraint: (Weekly Line Flow) Y <= (Weekly Line Capacity) C
+		ships_capacities = [s.vessel_capacity for s in vesselpool.vessels_list]
+		line_capacities = ship_vars @ ships_capacities  # shape = (line,)
+
+		for idx_line in range(n_lines):
+			line_capacity = line_capacities[idx_line]
+			weekly_line_capacity = line_capacity / week_vars[idx_line]
+			constraints.extend(Y_T_seg <= weekly_line_capacity for Y_T_seg in flow_vars[idx_line])
+		#
+		# endregion
+
+		# region Call Solver
+		prob = cp.Problem(cp.Minimize(obj_expr), constraints)
+		prob.solve(solver=cp.SCIP, verbose=False)
+		# prob.solve(solver=cp.ECOS)
+		# prob.solve(solver=cp.GLPK_MI)  # much slower than SCIP
+		#
+		#endregion
+
+		return {
+			'total profit (minus)': typing.cast(float, prob.value),
+			'line flows': flow_vars,
+			'weeks': week_vars,
+			'demand rounts': demand_vars,
+			'ships': ship_vars,
+			'port staying days': matrix_stay_days,
+			'line sailing days': list_saildays,
+		}
+
 
 	def solve_plan(self) -> None:
 		"""

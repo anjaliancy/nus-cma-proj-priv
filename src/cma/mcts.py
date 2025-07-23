@@ -219,7 +219,7 @@ class MonteCarloTreeSearchNode:
 			2. Evaluate the value of `self` after several steps of adjustments
 		"""
 		# solve immediate value
-		self.graph.solve_approximated_cost(portgraph, vesselpool, week_predictor=week_predictor)
+		self.graph.solve_approximated(portgraph, vesselpool, week_predictor=week_predictor)
 
 		# create a temporary root node whose parent is None
 		tmp_root = MonteCarloTreeSearchNode(self.graph, portgraph, self.prior_prob, None)
@@ -244,7 +244,7 @@ class MonteCarloTreeSearchNode:
 			# child_node is not None since `max_depth = infty`
 
 			the_node: MonteCarloTreeSearchNode = child_node
-			the_node.graph.solve_approximated_cost(portgraph, vesselpool, week_predictor=week_predictor)
+			the_node.graph.solve_approximated(portgraph, vesselpool, week_predictor=week_predictor)
 			# Check stopping
 			sum_weight *= discount_fac
 			sum_weight += 1

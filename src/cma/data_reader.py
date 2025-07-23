@@ -1,5 +1,6 @@
 from typing import Tuple
 from importlib import resources
+import random
 
 from .vessel import Vessel, VesselPool
 from .port import Port, PortPool, PortGraph
@@ -194,7 +195,7 @@ def read_current_line_data(portpool: PortPool,
 
 	file = resources.files('cma.res').joinpath(data_file_current_line)
 	df = pd.read_excel(file, sheet_name='Sheet1')  # read first table
-	df = df.rename(columns=lambda x: x.strip())  # trim titles
+	df = df.rename(columns=lambda x: x.strip())    # trim titles
 
 	df_grouped = df.groupby('Line Name').agg({
 		'Port ID': list,
@@ -219,4 +220,28 @@ def read_current_line_data(portpool: PortPool,
 		current_lines_weeks.append(total_weeks)
 	return current_lines, current_lines_weeks
 
+def randomly_create_lines(
+		portpool: PortPool,
+		line_num: int
+	) -> list[ServiceLine]:
+	"""
+	"""
+	current_lines = []
+	port_num = portpool.get_number_of_ports()
+	print(port_num)
+
+	for idx_line in range(line_num):
+		line_name = f'line_{idx_line + 1}'
+		idx_o = random.randint(0, port_num - 1)
+		idx_d = random.randint(0, port_num - 1)
+		if idx_o == idx_d:
+			idx_d += 1
+			idx_d %= (port_num - 1)
+		port_o = portpool.get_port_by_idx(idx_o)
+		port_d = portpool.get_port_by_idx(idx_d)
+		line = ServiceLine(
+			line_name, [port_o, port_d]
+		)
+		current_lines.append(line)
+	return current_lines
 

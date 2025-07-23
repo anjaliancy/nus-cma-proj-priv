@@ -10,6 +10,7 @@ from matplotlib.figure import Figure
 from matplotlib.axes import Axes
 from matplotlib.lines import Line2D
 from shapely.geometry import Point
+from shapely.ops import transform
 
 import geopandas as gpd
 import numpy as np
@@ -137,17 +138,23 @@ class PortPool:
 		return len(self.__port_list)
 
 	def plot(self, selected_countries: list[str],
-			plot_port_id: bool=False, display_info=True
+			plot_port_id: bool=False, display_info=True, center_pacific=False
 		) -> Tuple[Figure, Axes, 'PortPool']:
 		"""
 		This function input `selected_asia_countries` as a filter and
 		return a filtered new collection of ports that is only contained
 		in the graph.
 		"""
+		def shift_longitude(geom):
+			def shift_coords(x, y, z=None):
+				x_new = x + 360 if x < 0 else x
+				return (x_new, y) if z is None else (x_new, y, z)
+			return transform(shift_coords, geom)
+
 		MAP_FILE_PATH = '110m_cultural/ne_110m_admin_0_countries.shp'
 		file = resources.files("cma.res").joinpath(MAP_FILE_PATH)
 		geometry = [Point(port.get_location()) for port in self.__port_list]
-		gdf = gpd.GeoDataFrame({
+		gdf_port = gpd.GeoDataFrame({
 			'Port': [port.get_id() for port in self.__port_list],
 			'geometry': geometry
 			})
@@ -157,11 +164,16 @@ class PortPool:
 		world_names = world['NAME']
 		if not isinstance(world_names, pd.Series):
 			raise ValueError('Invalid file', file)
+
+		if center_pacific:
+			world["geometry"] = world["geometry"].apply(shift_longitude)
+			gdf_port['geometry'] = gdf_port['geometry'].apply(shift_longitude)
+
 		region = world.loc[world_names.isin(selected_countries)]
 		minx, miny, maxx, maxy = region.total_bounds
-		gdf_filtered = gdf.loc[
-			(gdf.geometry.x >= minx) & (gdf.geometry.x <= maxx) &
-			(gdf.geometry.y >= miny) & (gdf.geometry.y <= maxy)
+		gdf_filtered = gdf_port.loc[
+			(gdf_port.geometry.x >= minx) & (gdf_port.geometry.x <= maxx) &
+			(gdf_port.geometry.y >= miny) & (gdf_port.geometry.y <= maxy)
 		]
 		if display_info:
 			print('In Total ', len(gdf_filtered), ' ports are plotted')
@@ -303,10 +315,12 @@ class PortGraph(PortPool):
 	"""
 	__mat_distance: np.ndarray
 	__mat_demand: np.ndarray
+	__mat_unit_revenue: np.ndarray | None
 
 	def __init__(self, ports_pool: PortPool,
 			mat_distance: list[list[float]] | np.ndarray,
 			mat_demand: list[list[float]] | np.ndarray,
+			mat_unit_revenue: list[list[float]] | np.ndarray | None = None,
 			filter_by_demand=True):
 		"""
 		Input:
@@ -316,6 +330,10 @@ class PortGraph(PortPool):
 		ports_number = self.get_number_of_ports()
 		self.__mat_distance = np.array(mat_distance)[:ports_number, :ports_number]
 		self.__mat_demand = np.array(mat_demand)[:ports_number, :ports_number]
+		if mat_unit_revenue is not None:
+			self.__mat_unit_revenue = np.array(mat_unit_revenue)[:ports_number, :ports_number]
+		else:
+			self.__mat_unit_revenue = None
 
 		if filter_by_demand:
 			od_pairs = self.get_all_od_pairs()
@@ -352,7 +370,13 @@ class PortGraph(PortPool):
 		return self.__mat_distance[idx_i, idx_j]
 
 	def get_distance_by_idx(self, port_i_idx: int, port_j_idx: int) -> float:
-		return self.__mat_distance[port_i_idx][port_j_idx]
+		return self.__mat_distance[port_i_idx, port_j_idx]
+
+	def get_unit_revenue_by_idx(self, port_i_idx: int, port_j_idx: int) -> float | None:
+		if self.__mat_unit_revenue is None:
+			return None
+		else:
+			return self.__mat_unit_revenue[port_i_idx, port_j_idx]
 
 	def get_demand_flows(self) -> tuple[np.ndarray, np.ndarray]:
 		"""return:
@@ -387,25 +411,26 @@ class PortGraph(PortPool):
 	def filtered_by_sub_portpool(self, sub_portpool: PortPool):
 		indeces: list[int] = []
 		for p in sub_portpool.tolist_port():
-			if self.has_port_by_name(p.get_name()):
+			if self.has_port_by_id(p.get_id()):
 				indeces.append(self.get_unique_index(p))
 		sub_mat_demand = self.__mat_demand[indeces, :][:, indeces]
 		sub_mat_distance = self.__mat_distance[indeces, :][:, indeces]
 		return PortGraph(sub_portpool, sub_mat_distance, sub_mat_demand)
 
 	def plot(self, selected_countries: list[str],
-				plot_port_id: bool=False, display_info=False,
+				plot_port_id: bool=False, display_info=False, center_pacific=False,
 				demandtype: Literal['in', 'out', 'total']='total',
 				odpairs: bool = True, odpairs_color='red'
 			) -> Tuple[Figure, Axes, 'PortGraph']:
 		# Plot all ports by small red dot
-		fig, ax, portpool = super().plot(selected_countries, plot_port_id, display_info)
+		fig, ax, portpool = super().plot(selected_countries, plot_port_id, display_info, center_pacific)
 		portgraph = self.filtered_by_sub_portpool(portpool)
 		# Plot the demands of all ports
 		inflows, outflows = portgraph.get_demand_flows()
 		xs, ys = [], []
 		for port in portgraph.tolist_port():
 			x, y = port.get_location()
+			x = x + 360 if x < 0 else x
 			xs.append(x)
 			ys.append(y)
 		match demandtype:
@@ -423,12 +448,15 @@ class PortGraph(PortPool):
 			o, d = od
 			port_o = portgraph.get_port_by_idx(o)
 			port_d = portgraph.get_port_by_idx(d)
-			port_o_loc = port_o.get_location()
-			port_d_loc = port_d.get_location()
+			port_o_loc_x, port_o_loc_y = port_o.get_location()
+			port_d_loc_x, port_d_loc_y = port_d.get_location()
+			port_o_loc_x = port_o_loc_x + 360 if port_o_loc_x < 0 else port_o_loc_x
+			port_d_loc_x = port_d_loc_x + 360 if port_d_loc_x < 0 else port_d_loc_x
+
 			arctan_demand = 2 * np.arctan(portgraph.get_demand_by_idx(o, d)) / np.pi
 			line = Line2D(
-				[port_o_loc[0], port_d_loc[0]],
-				[port_o_loc[1], port_d_loc[1]],
+				[port_o_loc_x, port_d_loc_x],
+				[port_o_loc_y, port_d_loc_y],
 				color=odpairs_color,
 				alpha=0.15 * (arctan_demand)**2,
 				linewidth=arctan_demand**2
