@@ -650,3 +650,14 @@ class ServiceLine:
 				if p == sequence[0]:
 					sequence.pop(idx)
 		return ServiceLine(self.name(), sequence, _test)
+
+def create_service_line(
+		name: str, port_ids: list[str], portpool: PortPool
+) -> ServiceLine:
+	"""
+	"""
+	port_lst = []
+	for port_id in port_ids:
+		port = portpool.get_port(port_id)
+		port_lst.append(port)
+	return ServiceLine(name, port_lst)

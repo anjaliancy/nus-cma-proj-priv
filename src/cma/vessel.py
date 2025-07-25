@@ -86,7 +86,8 @@ class VesselPool:
 		re = []
 		for vessel in self.vessels_list:
 			df = vessel.bunkering_cost_coefs
-			cost = df.at[6, 'consumption'] * vessel.unit_bunkering_cost
+			df_nrow = df.shape[0]
+			cost = df.at[df_nrow // 2, 'consumption'] * vessel.unit_bunkering_cost
 			re.append(cost)
 		return re
 

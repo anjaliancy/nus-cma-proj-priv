@@ -9,7 +9,7 @@ Instructions:
 
 from .vessel import Vessel, VesselPool
 from .port import Port, PortPool, PortGraph
-from .serviceline import ServiceLine, LineAction
+from .serviceline import ServiceLine, LineAction, create_service_line
 from .servicegraph import ServiceGraph
 from .mcts import MonteCarloTreeSearchNode, MonteCarloTree
 from .rl_utils import MatrixAnalyzer

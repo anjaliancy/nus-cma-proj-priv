@@ -410,7 +410,6 @@ class ServiceGraph:
 			if week_predictor is None:
 				pass
 			else:
-				print('>>> hello')
 				sol = self.optimize_profit(
 					od_pairs,
 					od_pairs_paths,
@@ -1052,7 +1051,7 @@ class ServiceGraph:
 			portgraph: PortGraph,
 			vesselpool: VesselPool,
 			model: RegressionResultsWrapper,
-			max_transit_time: int = 7
+			max_transit_time: int = 99
 	):
 		"""
 		"""

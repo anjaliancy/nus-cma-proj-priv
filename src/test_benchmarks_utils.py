@@ -3,7 +3,9 @@ import numpy as np
 
 from cma import Vessel, VesselPool
 from cma import Port, PortPool
-
+from cma import ServiceGraph
+from cma import create_service_line
+from cma import read_port_data as cma_read_port_data
 
 df_demand = pd.read_csv('./LINERLIB/data/Demand_Pacific.csv', sep='\t')
 df_vessel = pd.read_csv('./LINERLIB/data/fleet_Data.csv', sep='\t')
@@ -69,9 +71,9 @@ def read_demand(portpool: PortPool) -> tuple[np.ndarray, np.ndarray]:
 def read_port_data(vesselpool: VesselPool, cma_portpool: PortPool) -> PortPool:
 	"""
 	"""
-	all_source = set(df_demand['Origin'].values)
-	all_dest = set(df_demand['Destination'].values)
-	all_ports_id = all_source.union(all_dest)
+	# all_source = set(df_demand['Origin'].values)
+	# all_dest = set(df_demand['Destination'].values)
+	all_ports_id = df_ports['UNLocode'].values
 	port_lst = []
 
 	for p_id in all_ports_id:
@@ -125,4 +127,28 @@ def read_port_data(vesselpool: VesselPool, cma_portpool: PortPool) -> PortPool:
 			port_lst.append(port)
 	portpool = PortPool(port_lst)
 	return portpool
+
+
+line_1_idlst = ['CNXMN', 'KRPUS', 'TWKHH', 'PHMNL', 'CNYTN', 'HKHKG',
+	'VNHPH', 'IDSUB', 'MYPEN', 'MYPKG', 'SGSIN', 'MYTPP', 'THLCH']
+line_2_idlst = ['SGSIN', 'CNFOC', 'CNTAO', 'CNDLC', 'CAVAN', 'USSEA', 'CNXMN',
+	'KRPUS', 'USOAK', 'MXLZC', 'USLAX', 'HKHKG', 'CNYTN', 'MYTPP']
+line_3_idlst = ['MYTPP', 'CNSHA', 'JPYOK', 'PABLB']
+line_4_idlst = ['CNDLC', 'CNXMN', 'MYTPP', 'CNTAO']
+line_5_idlst = ['KRPUS', 'HKHKG', 'TWKHH', 'JPNGO', 'JPYOK', 'USLAX', 'CNTAO', 'PABLB']
+line_6_idlst = ['USOAK', 'JPYOK', 'TWKHH', 'CNSHA', 'CNTAO', 'CNDLC', 'USLGB', 'USLAX']
+line_7_idlst = ['SGSIN', 'HKHKG', 'KRPUS', 'USOAK', 'USLAX', 'JPYOK', 'TWKHH', 'MYTPP']
+line_8_idlst = ['VNDAD', 'MYTPP', 'THLCH', 'MYTPP', 'IDSRG', 'IDJKT', 'VNSGN']
+line_9_idlst = ['SGSIN', 'THLCH', 'MYTPP', 'VNSGN']
+line_10_idlst = ['TWKHH', 'MYTPP', 'MYPKG', 'CNYTN']
+line_11_idlst = ['NICIO', 'MXLZC', 'PAMIT', 'PABLB', 'SVAQJ']
+line_12_idlst = ['MXESE', 'HKHKG', 'CNSHA', 'KRPUS', 'USOAK', 'SVAQJ', 'PABLB']
+line_13_idlst = ['JPTYO', 'JPYOK', 'JPHKT', 'KRPUS']
+line_14_idlst = ['SGSIN', 'MYTPP', 'CNYTN', 'CNTAO', 'KRPUS', 'CNLYG', 'JPSMZ', 'JPYOK', 'JPUKB', 'CNSHA', 'TWKHH']
+line_15_idlst = ['CNDLC', 'JPYOK', 'JPUKB', 'KRPUS', 'CNTAO', 'HKHKG', 'MYTPP', 'CNYTN']
+line_16_idlst = ['CNYTN', 'TWKHH', 'PHGES', 'CNSHA', 'IDJKT', 'THLCH', 'MYTPP', 'SGSIN', 'VNSGN']
+line_17_idlst = ['TWKEL', 'CNYTN']
+
+
+
 
