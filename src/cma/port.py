@@ -345,6 +345,9 @@ class PortGraph(PortPool):
 			sub_ports = list(portset)
 			sub_demands = self.get_filtered_demand_matrix(sub_ports)
 			sub_distance = self.get_filtered_distance_matrix(sub_ports)
+			if self.__mat_unit_revenue is not None:
+				sub_unit_revenue = self.get_filtered_demand_unit_matrix(sub_ports)
+				self.__mat_unit_revenue = sub_unit_revenue
 			super().update(sub_ports)
 			self.__mat_demand = sub_demands
 			self.__mat_distance = sub_distance
@@ -407,6 +410,12 @@ class PortGraph(PortPool):
 	def get_filtered_distance_matrix(self, ports: list[Port]) -> np.ndarray:
 		indeces = [self.get_unique_index(p) for p in ports]
 		return self.__mat_distance[indeces, :][:, indeces]
+
+	def get_filtered_demand_unit_matrix(self, ports: list[Port]) -> np.ndarray:
+		if self.__mat_unit_revenue is None:
+			ValueError("`Portgraph.get_filtered_demand_unit_matrix`: self.__mat_unit_revenue is None")
+		indeces = [self.get_unique_index(p) for p in ports]
+		return self.__mat_unit_revenue[indeces, :][:, indeces]  # type: ignore
 
 	def filtered_by_sub_portpool(self, sub_portpool: PortPool):
 		indeces: list[int] = []

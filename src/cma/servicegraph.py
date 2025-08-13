@@ -406,17 +406,15 @@ class ServiceGraph:
 					vesselpool,
 					week_predictor)
 				self.__total_cost += sol['total cost']
+			return sol
 		else:
-			if week_predictor is None:
-				pass
-			else:
-				sol = self.optimize_profit(
+			sol = self.optimize_profit(
 					od_pairs,
 					od_pairs_paths,
 					portgraph,
-					vesselpool,
-					week_predictor)
-				self.__total_profit = sol['total profit']
+					vesselpool)
+			self.__total_profit = sol['total profit']
+			return sol
 
 	def fulfill_demands(self,
 			od_pairs: list[tuple[int, int]],
@@ -1050,23 +1048,21 @@ class ServiceGraph:
 			od_pair_paths: list[list[Path]],
 			portgraph: PortGraph,
 			vesselpool: VesselPool,
-			model: RegressionResultsWrapper,
-			max_transit_time: int = 99
-	):
+	) -> dict:
 		"""
 		"""
 		constraints = []
 		obj_expr = 0.0
+		middle_speed = 14
 
 		n_lines = len(self.__lines_list)
 		n_vessel_class = len(vesselpool.vessels_list)
+		vessel_numbers = vesselpool.numbers_list
 
-		# predict weeks
-		week_vars = apply_prediction(model, self.__lines_list, portgraph, vesselpool)
+		week_vars = [0 for _ in self.__lines_list]
 
-		for week in week_vars:
-			if week > max_transit_time:
-				return { 'total profit': 0.0 }
+		for idx_line, line in enumerate(self.__lines_list):
+			week_vars[idx_line] = int(line.get_distance(portgraph) / middle_speed / 24 / 7) + 1
 
 		# region Key Variables
 		#
@@ -1109,8 +1105,8 @@ class ServiceGraph:
 		#     - columns = ports
 		seg_demand_flows: dict[str, cp.Expression] = {}
 		# >> `seg_demand_flows`: all demand of each segment
-		#     - key   = segment (od)
-		#     - value = sum_{od} X_{od, p}
+		#     - key   = segment (i,j)
+		#     - value = sum_{od} X_{od, p} where (i,j) in p
 		for demand_vars_od, od, od_paths in zip(demand_vars, od_pairs, od_pair_paths):
 			for idx_path, p in enumerate(od_paths):
 				x_od_p = demand_vars_od[idx_path]
@@ -1162,11 +1158,12 @@ class ServiceGraph:
 		# region Objective
 		# 1. Weekly Chartering Cost
 		daily_charter_costs = vesselpool.get_chartering_costs()
-		obj_expr += 7 * cp.sum(ship_vars @ daily_charter_costs)
+		obj_expr -= 7 * cp.sum(ship_vars @ daily_charter_costs)
 
 		# 2. Weekly Transshipment Cost
 		# 1) transshipment cost per hour for each port
 		ports_costs_transsip = [port.cost_transship for port in portgraph.tolist_port()]
+
 		# 2) hour productivity of each port
 		ports_prods = [port.get_producticity(vesselpool) for port in portgraph.tolist_port()]
 		ports_gross_prod = [sum(prods) for prods in ports_prods]
@@ -1175,17 +1172,12 @@ class ServiceGraph:
 
 		for idx_line in range(n_lines):
 			matrix_stay_days[idx_line, :] = transshipments[idx_line, :] / ports_gross_prod / 24
-			obj_expr += matrix_stay_days[idx_line, :] @ ports_costs_transsip
+			obj_expr -= matrix_stay_days[idx_line, :] @ ports_costs_transsip
 
 		# 3. Weekly Bunkering Cost
-		list_saildays = []
-
 		for idx_line, line in enumerate(self.__lines_list):
 			line_ship_vars = ship_vars[idx_line, :]   # shape = (rank,)
-			line_port_stay_days = np.sum(matrix_stay_days[idx_line, :])
-			line_sailing_days = 7 * week_vars[idx_line] - line_port_stay_days
-			list_saildays.append(line_sailing_days)
-			obj_expr += 7 * line_ship_vars @ vesselpool.get_bukering_cost_middle()
+			obj_expr -= 7 * line_ship_vars @ vesselpool.get_bukering_cost_middle()
 
 		# 4. Weekly Port Call Cost
 		for idx_line, line in enumerate(self.__lines_list):
@@ -1194,27 +1186,29 @@ class ServiceGraph:
 			for port in line.tolist_port():
 				portcall_cost_rates = port.get_portcall_costs(vesselpool)
 				line_portcall_cost += line_ships @ portcall_cost_rates
-			obj_expr += line_portcall_cost / week_vars[idx_line]
+			obj_expr -= line_portcall_cost / week_vars[idx_line]
 
 		# 5. Revenue
 		for demand_vars_od, pair_od in zip(demand_vars, od_pairs):
 			unit_revenue_od = portgraph.get_unit_revenue_by_idx(*pair_od)
 			assert unit_revenue_od is not None
-			demand_od_fulfill = 0
 			for x_od_p in demand_vars_od:
-				demand_od_fulfill += x_od_p
-			obj_expr -= unit_revenue_od * demand_od_fulfill
+				obj_expr += unit_revenue_od * x_od_p * 1000
 		#
 		# endregion
 
 		# region Key Constraints
-		# Constraint: (Weekly Demand Flow) sum X_{odp} >= (Weekly Demand) D_{od}
-		# for pair_od, demand_vars_od in zip(od_pairs, demand_vars):
-		# 	demand_od = portgraph.get_demand_by_idx(pair_od[0], pair_od[1])
-		# 	demand_od_fulfill = 0
-		# 	for x_od_p in demand_vars_od:
-		# 		demand_od_fulfill += x_od_p
-		# 	constraints.append(demand_od_fulfill >= demand_od)
+		# Constraint: Vessel number
+		ship_vars_avg = cp.sum(ship_vars, axis=0)
+		constraints.append(ship_vars_avg <= vessel_numbers)  # type:ignore
+
+		# Constraint: demand fullfilment
+		for demand_vars_od, pair_od in zip(demand_vars, od_pairs):
+			demand_od = portgraph.get_demand_by_idx(*pair_od)
+			sum_demand_route = 0
+			for x_od_p in demand_vars_od:
+				sum_demand_route += x_od_p
+			constraints.append(sum_demand_route <= demand_od)
 
 		# Constraint: (Weekly Edge Flow) sum_T Y_{T, i, j} >= (Weekly Line Demand Flow) sum_{p has (i,j)} X_{o, d, p}
 		for seg_id, seg_demand_flow in seg_demand_flows.items():
@@ -1227,26 +1221,32 @@ class ServiceGraph:
 		for idx_line in range(n_lines):
 			line_capacity = line_capacities[idx_line]
 			weekly_line_capacity = line_capacity / week_vars[idx_line]
-			constraints.extend(Y_T_seg <= weekly_line_capacity for Y_T_seg in flow_vars[idx_line])
+			constraints.extend(Y_T_segs <= weekly_line_capacity for Y_T_segs in flow_vars[idx_line])
 		#
 		# endregion
 
 		# region Call Solver
-		prob = cp.Problem(cp.Minimize(obj_expr), constraints)
+		prob = cp.Problem(cp.Maximize(obj_expr), constraints)
 		prob.solve(solver=cp.SCIP, verbose=False)
 		# prob.solve(solver=cp.ECOS)
 		# prob.solve(solver=cp.GLPK_MI)  # much slower than SCIP
 		#
 		#endregion
 
+		# for seg_id, seg_demand_flow in seg_demand_flows.items():
+		# 	print('>>> seg_id =', seg_id, ' seg_demand_flow =', seg_demand_flow.value)
+		# for idx_line in range(n_lines):
+		# 	line_capacity = line_capacities[idx_line]
+		# 	print('>>> line_capacity =', line_capacity.value)
+
 		return {
-			'total profit (minus)': typing.cast(float, prob.value),
+			'total profit': typing.cast(float, prob.value),
 			'line flows': flow_vars,
-			'weeks': week_vars,
 			'demand rounts': demand_vars,
 			'ships': ship_vars,
+			'capacities': line_capacities,
+			'weeks': week_vars,
 			'port staying days': matrix_stay_days,
-			'line sailing days': list_saildays,
 		}
 
 
