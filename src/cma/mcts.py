@@ -35,10 +35,13 @@ class MonteCarloTreeSearchNode:
 	children: list['MonteCarloTreeSearchNode']
 	parent: Optional['MonteCarloTreeSearchNode']
 
+	min_cost: bool
+
 	def __init__(self,
 			servicegraph: ServiceGraph,
 			portgraph: PortGraph,
 			prior_prob: float,
+			min_cost: bool,
 			parent: Optional['MonteCarloTreeSearchNode'] = None
 		):
 		"""
@@ -58,6 +61,8 @@ class MonteCarloTreeSearchNode:
 		self.borns = []
 		self.children = []
 		self.parent = parent
+
+		self.min_cost = min_cost
 
 	# def get_all_actions(self, portgraph: PortGraph) -> list[GraphAction]:
 	# 	"""
@@ -194,7 +199,7 @@ class MonteCarloTreeSearchNode:
 		# 	if c_exist:
 		# 		return c
 		new_graph = self.graph.update_by_graph_action(graph_action, portgraph)
-		child_node = MonteCarloTreeSearchNode(new_graph, portgraph, prior_prob, self)
+		child_node = MonteCarloTreeSearchNode(new_graph, portgraph, prior_prob, self.min_cost, self)
 		self.children.append(child_node)
 		self.borns.append(graph_action)
 		return child_node
@@ -222,7 +227,7 @@ class MonteCarloTreeSearchNode:
 		self.graph.solve_approximated(portgraph, vesselpool, week_predictor=week_predictor)
 
 		# create a temporary root node whose parent is None
-		tmp_root = MonteCarloTreeSearchNode(self.graph, portgraph, self.prior_prob, None)
+		tmp_root = MonteCarloTreeSearchNode(self.graph, portgraph, self.prior_prob, self.min_cost, None)
 		the_node = tmp_root
 
 		total_weight = 1 / (1 - discount_fac)
@@ -393,7 +398,10 @@ class MonteCarloTreeSearchNode:
 		return q_value + c_param * self.prior_prob * tmp
 
 	def current_state_reward(self) -> float:
-		return 1 / self.graph.total_cost()
+		if self.min_cost:
+			return 1 / self.graph.total_cost()
+		else:
+			return self.graph.total_profit()
 
 
 
@@ -418,12 +426,13 @@ class MonteCarloTree:
 			discount_fac:float=0.5,
 			c_param: float=0.5,
 			max_depth: int=5,
+			min_cost: bool=True,
 			week_predict_model: None | RegressionResultsWrapper = None):
 		'''
 		Input:
 			`max_depth`: depth of root is zero
 		'''
-		self.root_node = MonteCarloTreeSearchNode(servicegraph, portgraph, 1, None)
+		self.root_node = MonteCarloTreeSearchNode(servicegraph, portgraph, 1, min_cost, None)
 		self.portgraph = portgraph
 		self.vesselpool = vesselpool
 		self.c_param = c_param
