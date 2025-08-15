@@ -376,7 +376,7 @@ class ServiceGraph:
 		od_pairs_dict = self.get_all_paths(portgraph, trans_ports)
 		od_pairs = od_pairs_dict['od_pairs']
 		od_pairs_paths = od_pairs_dict['od_pairs_path']
-		# od_pairs_demand = od_pairs_dict['od_pairs_demand']
+		# od_pairs_demand = od_pairs_dict['od_pairs_demand']  # buggy
 		unconnected = od_pairs_dict['unconnected']
 		unconnected_demand = od_pairs_dict['unconnected_demand']
 
@@ -408,11 +408,14 @@ class ServiceGraph:
 				self.__total_cost += sol['total cost']
 			return sol
 		else:
+			if week_predictor is None:
+				return None
 			sol = self.optimize_profit(
 					od_pairs,
 					od_pairs_paths,
 					portgraph,
-					vesselpool)
+					vesselpool,
+					week_predictor)
 			self.__total_profit = sol['total profit']
 			return sol
 
@@ -1048,21 +1051,26 @@ class ServiceGraph:
 			od_pair_paths: list[list[Path]],
 			portgraph: PortGraph,
 			vesselpool: VesselPool,
+			model: RegressionResultsWrapper,
 	) -> dict:
 		"""
 		"""
 		constraints = []
 		obj_expr = 0.0
-		middle_speed = 14
+		middle_speed = 13
 
 		n_lines = len(self.__lines_list)
 		n_vessel_class = len(vesselpool.vessels_list)
 		vessel_numbers = vesselpool.numbers_list
 
-		week_vars = [0 for _ in self.__lines_list]
-
+		week_vars_pred = [0 for _ in self.__lines_list]
 		for idx_line, line in enumerate(self.__lines_list):
-			week_vars[idx_line] = int(line.get_distance(portgraph) / middle_speed / 24 / 7) + 1
+			week_vars_pred[idx_line] = int(line.get_distance(portgraph) / middle_speed / 24 / 7) + 1
+		#week_vars = [7, 13, 9, 3, 13, 7, 8, 4, 2, 2, 4, 10, 1.5, 5, 4, 6, 1]
+		week_vars = apply_prediction(model, self.__lines_list, portgraph, vesselpool)
+		for idx_week_i, week_i in enumerate(week_vars):
+			if week_i < week_vars_pred[idx_week_i] - 2:
+				week_vars[idx_week_i] = week_vars_pred[idx_week_i]
 
 		# region Key Variables
 		#
@@ -1158,12 +1166,13 @@ class ServiceGraph:
 		# region Objective
 		# 1. Weekly Chartering Cost
 		daily_charter_costs = vesselpool.get_chartering_costs()
-		obj_expr -= 7 * cp.sum(ship_vars @ daily_charter_costs)
+		total_charter_costs = 7 * cp.sum(ship_vars @ daily_charter_costs)
+		obj_expr -= total_charter_costs
 
 		# 2. Weekly Transshipment Cost
+		total_transshipment_cost = 0
 		# 1) transshipment cost per hour for each port
 		ports_costs_transsip = [port.cost_transship for port in portgraph.tolist_port()]
-
 		# 2) hour productivity of each port
 		ports_prods = [port.get_producticity(vesselpool) for port in portgraph.tolist_port()]
 		ports_gross_prod = [sum(prods) for prods in ports_prods]
@@ -1172,28 +1181,42 @@ class ServiceGraph:
 
 		for idx_line in range(n_lines):
 			matrix_stay_days[idx_line, :] = transshipments[idx_line, :] / ports_gross_prod / 24
-			obj_expr -= matrix_stay_days[idx_line, :] @ ports_costs_transsip
+			total_transshipment_cost += transshipments[idx_line, :] @ ports_costs_transsip
+		obj_expr -= total_transshipment_cost
 
 		# 3. Weekly Bunkering Cost
+		total_bunkering_cost = 0
 		for idx_line, line in enumerate(self.__lines_list):
+			sailing_days = 5.5  # suppose stay in port for 1.5 days a week
 			line_ship_vars = ship_vars[idx_line, :]   # shape = (rank,)
-			obj_expr -= 7 * line_ship_vars @ vesselpool.get_bukering_cost_middle()
+			total_bunkering_cost += line_ship_vars * sailing_days @ vesselpool.get_bukering_cost_middle()
+		obj_expr -= total_bunkering_cost
 
 		# 4. Weekly Port Call Cost
+		total_portcall_cost = 0
 		for idx_line, line in enumerate(self.__lines_list):
 			line_ships = ship_vars[idx_line, :]  # how many ships in each class
 			line_portcall_cost = 0               # total portcall cost of the line
 			for port in line.tolist_port():
 				portcall_cost_rates = port.get_portcall_costs(vesselpool)
 				line_portcall_cost += line_ships @ portcall_cost_rates
-			obj_expr -= line_portcall_cost / week_vars[idx_line]
+			total_portcall_cost += line_portcall_cost / week_vars[idx_line]
+		obj_expr -= total_portcall_cost
 
 		# 5. Revenue
+		total_revenue = 0
+		total_penalty = 0
 		for demand_vars_od, pair_od in zip(demand_vars, od_pairs):
+			total_demand_od = portgraph.get_demand_by_idx(*pair_od)
+			fulfilled_demand_od = 0
 			unit_revenue_od = portgraph.get_unit_revenue_by_idx(*pair_od)
 			assert unit_revenue_od is not None
 			for x_od_p in demand_vars_od:
-				obj_expr += unit_revenue_od * x_od_p * 1000
+				fulfilled_demand_od += x_od_p
+			total_revenue += fulfilled_demand_od * unit_revenue_od
+			total_penalty += 1000 * (total_demand_od - fulfilled_demand_od)
+		obj_expr += total_revenue
+		obj_expr -= total_penalty
 		#
 		# endregion
 
@@ -1242,11 +1265,17 @@ class ServiceGraph:
 		return {
 			'total profit': typing.cast(float, prob.value),
 			'line flows': flow_vars,
-			'demand rounts': demand_vars,
+			'demand routes': demand_vars,
 			'ships': ship_vars,
 			'capacities': line_capacities,
 			'weeks': week_vars,
 			'port staying days': matrix_stay_days,
+			'chartering cost': total_charter_costs,
+			'transshipment cost': total_transshipment_cost,
+			'bunkering cost': total_bunkering_cost,
+			'portcall cost': total_portcall_cost,
+			'revenue': total_revenue,
+			'penalty': total_penalty,
 		}
 
 

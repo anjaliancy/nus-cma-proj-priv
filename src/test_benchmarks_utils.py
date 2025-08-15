@@ -32,7 +32,7 @@ def read_vessel_class_data() -> VesselPool:
 				'speed': row['designSpeed'],
 				'consumption': row['Bunker ton per day at designSpeed'],
 			}],
-			579  # unit bunkering cost is set the same as CMA data
+			600  # unit bunkering cost by the data
 		)
 		vessel_lst.append(vessel)
 		idx_row += 1
@@ -61,7 +61,7 @@ def read_demand(portpool: PortPool) -> tuple[np.ndarray, np.ndarray]:
 		from_port = port_mapping.get(row['Origin'], -1)
 		to_port = port_mapping.get(row['Destination'], -1)
 		week_amount = row['FFEPerWeek']
-		revenue_per_unit = row['Revenue_1'] / week_amount
+		revenue_per_unit = row['Revenue_1']
 		if from_port >= 0 and to_port >= 0:
 			week_demands[from_port, to_port] += week_amount
 			unit_revenue[from_port, to_port] += revenue_per_unit
@@ -77,10 +77,11 @@ def read_port_data(vesselpool: VesselPool, cma_portpool: PortPool) -> PortPool:
 	port_lst = []
 
 	for p_id in all_ports_id:
-		if cma_portpool.has_port_by_id(p_id):
-			port = cma_portpool.get_port(p_id)
-			port_lst.append(port)
-		else:
+		#if cma_portpool.has_port_by_id(p_id):
+		#	port = cma_portpool.get_port(p_id)
+		#	port.transshipment_capacity = True
+		#	port_lst.append(port)
+		#else:
 			row = df_ports.loc[df_ports['UNLocode'] == p_id].iloc[0]
 			port = Port(
 				port_id=p_id,
@@ -119,10 +120,10 @@ def read_port_data(vesselpool: VesselPool, cma_portpool: PortPool) -> PortPool:
 				},
 				cost_transship=row['CostPerFULLTrnsf'],
 				cost_storage=0,
-				transshipment_capacity=True,
+				transshipment_capacity=row['CostPerFULLTrnsf'] is not None,
 				max_draft=row['Draft'],
 				max_daily_call=99,
-				max_line_visit=2
+				max_line_visit=99
 			)
 			port_lst.append(port)
 	portpool = PortPool(port_lst)

@@ -1,4 +1,4 @@
-Command line parameters: 
+Command line parameters:
 ports /home/berit/git/LINERLIB/data/ports.csv demands /home/berit/git/LINERLIB/data/Demand_Pacific.csv distances /home/berit/git/LINERLIB/data/dist_dense.csv vessels /home/berit/git/LINERLIB/data/fleet_Pacific.csv quantities /home/berit/git/LINERLIB/data/fleet_data.csv
 Seed = 1398713795
 *********************Best found solution********************************
@@ -148,7 +148,7 @@ capacity 2400
 service 7 service id 7
 capacity 450
  # vessels 4
- Butterfly rotation 
+ Butterfly rotation
 4	VNDAD	Da Nang
 40	MYTPP	Tanjung Pelepas
 20	THLCH	Laem Chabang
@@ -329,7 +329,7 @@ capacity 800
  Bunker fuel burn in Ton 34.4761
  Total bunker cost at 600 USD for one round trip 23685.7
  Total TC cost 56000
- ------------------Flow Solution ---------------------- 
+ ------------------Flow Solution ----------------------
 ID:0 SVAQJ->PABLB Transported 16, trans in %: 100
  Path SVAQJ_11->PABLB_11
 ID:1 SVAQJ->KRPUS Transported 5, trans in %: 100
