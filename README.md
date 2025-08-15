@@ -9,6 +9,7 @@ This is the code of NUS CMA project
 Examples:
 
 - [A Smaller Network - Southearstern Asia](./src/example_southeasternAsia.ipynb).
+- [Compared to Benchmark Model (LINERLIB)](./src/test_benchmarks.ipynb).
 
 Reports:
 
