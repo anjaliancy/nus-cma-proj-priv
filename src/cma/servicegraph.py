@@ -353,7 +353,7 @@ class ServiceGraph:
 	def solve_approximated(self, portgraph: PortGraph, vesselpool: VesselPool,
 			week_predictor: None | RegressionResultsWrapper = None,
 			min_cost: bool = True,
-			week_levels = (1/2, 1, 2, 3, 4, 5, 6, 7, 8, 9),  # <= 5
+			week_levels = (1/2, 1, 2, 3, 4, 5),  # <= 15
 			tuneparams_1={
 				'unfulfilled_demand_panelty': 1e3,
 				'batch_size': 10000
@@ -361,7 +361,7 @@ class ServiceGraph:
 			tuneparams_2={
 				'turnon-transship_shipclass_restriction': 0, # making the algorithm slow
 				'turnon-vessel_speed_optimization': 0,       # making the algorithm super slow
-				'ctrparam-kts_buffer': 2,
+				'ctrparam-kts_buffer': 0,
 				'ctrparam-transship_A': 100,
 				'BigM-transship': 10000,
 				'BigM-n_ships' : 2,  # at most 2 ships of the same type
@@ -409,14 +409,16 @@ class ServiceGraph:
 			return sol
 		else:
 			if week_predictor is None:
+				self.__total_profit = 0
 				return None
-			sol = self.optimize_profit(
+			else:
+				sol = self.optimize_profit(
 					od_pairs,
 					od_pairs_paths,
 					portgraph,
 					vesselpool,
 					week_predictor)
-			self.__total_profit = sol['total profit']
+				self.__total_profit = sol['total profit']
 			return sol
 
 	def fulfill_demands(self,
@@ -738,7 +740,7 @@ class ServiceGraph:
 			list_saildays.append(line_sailing_days)
 			buf = tuneparams['ctrparam-kts_buffer']
 
-			if tuneparams['turnon-vessel_speed_optimization'] < 1/2:
+			if tuneparams['turnon-vessel_speed_optimization'] > 1/2:
 				obj_expr += 7 * line_ship_vars @ vesselpool.get_bukering_cost_middle()
 				# Constraint: KTS_min <= Speed (distance / sailing days) <= KTS_max
 				constraints.append(line_sailing_days >= 0.5 * 7)
@@ -833,7 +835,8 @@ class ServiceGraph:
 
 		# region Call Solver
 		prob = cp.Problem(cp.Minimize(obj_expr), constraints)
-		prob.solve(solver=cp.SCIP, verbose=False)
+		prob.solve(solver=cp.GUROBI, verbose=False)
+		# prob.solve(solver=cp.SCIP, verbose=False)
 		# prob.solve(solver=cp.ECOS)
 		# prob.solve(solver=cp.GLPK_MI)  # much slower than SCIP
 		#
@@ -1030,7 +1033,8 @@ class ServiceGraph:
 
 		# region Call Solver
 		prob = cp.Problem(cp.Minimize(obj_expr), constraints)
-		prob.solve(solver=cp.SCIP, verbose=False)
+		prob.solve(solver=cp.GUROBI, verbose=False)
+		# prob.solve(solver=cp.SCIP, verbose=False)
 		# prob.solve(solver=cp.ECOS)
 		# prob.solve(solver=cp.GLPK_MI)  # much slower than SCIP
 		#
@@ -1055,22 +1059,51 @@ class ServiceGraph:
 	) -> dict:
 		"""
 		"""
-		constraints = []
-		obj_expr = 0.0
-		middle_speed = 13
-
 		n_lines = len(self.__lines_list)
 		n_vessel_class = len(vesselpool.vessels_list)
-		vessel_numbers = vesselpool.numbers_list
+		middle_speed = 15
 
-		week_vars_pred = [0 for _ in self.__lines_list]
+		# initial prediction of weeks
+		week_vars_pred = [0.0 for _ in self.__lines_list]
 		for idx_line, line in enumerate(self.__lines_list):
-			week_vars_pred[idx_line] = int(line.get_distance(portgraph) / middle_speed / 24 / 7) + 1
-		#week_vars = [7, 13, 9, 3, 13, 7, 8, 4, 2, 2, 4, 10, 1.5, 5, 4, 6, 1]
+			line_week_tmp = line.get_distance(portgraph) / (middle_speed * 24 * 7)
+			if line_week_tmp > 100000:
+				print('>>> `optimize_profit`', line, line.get_distance(portgraph), middle_speed)
+			week_vars_pred[idx_line] = int(line_week_tmp) + 1
 		week_vars = apply_prediction(model, self.__lines_list, portgraph, vesselpool)
 		for idx_week_i, week_i in enumerate(week_vars):
 			if week_i < week_vars_pred[idx_week_i] - 2:
-				week_vars[idx_week_i] = week_vars_pred[idx_week_i]
+				week_vars[idx_week_i] = week_vars_pred[idx_week_i] - 1
+
+		line_speeds = np.array([0 for _ in range(n_lines)])
+		sol = { 'speeds': line_speeds, 'weeks': week_vars }
+		while not all(10 <= x <= 18 for x in line_speeds):
+			sol = self._solve_optimize_profit2_problem(
+				week_vars,
+				n_lines, n_vessel_class,
+				portgraph, vesselpool, od_pairs, od_pair_paths
+			)
+			line_speeds = sol['speeds']
+			for idx_line, speed in enumerate(line_speeds):
+				if speed < 10:
+					week_vars[idx_line] -= 1
+				if speed > 18:
+					week_vars[idx_line] += 1
+		return sol
+
+
+	def _solve_optimize_profit2_problem(self,
+			week_vars,
+			n_lines: int, n_vessel_class: int,
+			portgraph: PortGraph,
+			vesselpool: VesselPool,
+			od_pairs: list[tuple[int, int]],
+			od_pair_paths: list[list[Path]],
+	):
+		"""
+		"""
+		constraints = []
+		obj_expr = 0.0
 
 		# region Key Variables
 		#
@@ -1176,7 +1209,7 @@ class ServiceGraph:
 		# 2) hour productivity of each port
 		ports_prods = [port.get_producticity(vesselpool) for port in portgraph.tolist_port()]
 		ports_gross_prod = [sum(prods) for prods in ports_prods]
-		# 3) Port staying days per week for each line (row) and each port (rolumn)
+		# 3) Port staying days per week for each line (row) and each port (column)
 		matrix_stay_days = np.array([[0 for _ in portgraph.tolist_port()] for _ in self.__lines_list], dtype=object)
 
 		for idx_line in range(n_lines):
@@ -1223,9 +1256,10 @@ class ServiceGraph:
 		# region Key Constraints
 		# Constraint: Vessel number
 		ship_vars_avg = cp.sum(ship_vars, axis=0)
+		vessel_numbers = vesselpool.numbers_list
 		constraints.append(ship_vars_avg <= vessel_numbers)  # type:ignore
 
-		# Constraint: demand fullfilment
+		# Constraint: Demand fullfilment
 		for demand_vars_od, pair_od in zip(demand_vars, od_pairs):
 			demand_od = portgraph.get_demand_by_idx(*pair_od)
 			sum_demand_route = 0
@@ -1250,17 +1284,18 @@ class ServiceGraph:
 
 		# region Call Solver
 		prob = cp.Problem(cp.Maximize(obj_expr), constraints)
-		prob.solve(solver=cp.SCIP, verbose=False)
+		prob.solve(solver=cp.GUROBI, verbose=False)
+		# prob.solve(solver=cp.SCIP, verbose=False)
 		# prob.solve(solver=cp.ECOS)
 		# prob.solve(solver=cp.GLPK_MI)  # much slower than SCIP
 		#
 		#endregion
 
-		# for seg_id, seg_demand_flow in seg_demand_flows.items():
-		# 	print('>>> seg_id =', seg_id, ' seg_demand_flow =', seg_demand_flow.value)
-		# for idx_line in range(n_lines):
-		# 	line_capacity = line_capacities[idx_line]
-		# 	print('>>> line_capacity =', line_capacity.value)
+		line_speeds = np.array([0.0 for _ in range(n_lines)])
+		for idx_line, line in enumerate(self.__lines_list):
+			line_portstay_days = sum(matrix_stay_days[idx_line, :]).value
+			line_sailing_days = 7 * week_vars[idx_line] - line_portstay_days
+			line_speeds[idx_line] = line.get_distance(portgraph) / line_sailing_days / 24
 
 		return {
 			'total profit': typing.cast(float, prob.value),
@@ -1269,6 +1304,7 @@ class ServiceGraph:
 			'ships': ship_vars,
 			'capacities': line_capacities,
 			'weeks': week_vars,
+			'speeds': line_speeds,
 			'port staying days': matrix_stay_days,
 			'chartering cost': total_charter_costs,
 			'transshipment cost': total_transshipment_cost,

@@ -224,7 +224,8 @@ class MonteCarloTreeSearchNode:
 			2. Evaluate the value of `self` after several steps of adjustments
 		"""
 		# solve immediate value
-		self.graph.solve_approximated(portgraph, vesselpool, week_predictor=week_predictor)
+		self.graph.solve_approximated(portgraph, vesselpool,
+				week_predictor=week_predictor, min_cost=self.min_cost)
 
 		# create a temporary root node whose parent is None
 		tmp_root = MonteCarloTreeSearchNode(self.graph, portgraph, self.prior_prob, self.min_cost, None)
@@ -249,7 +250,8 @@ class MonteCarloTreeSearchNode:
 			# child_node is not None since `max_depth = infty`
 
 			the_node: MonteCarloTreeSearchNode = child_node
-			the_node.graph.solve_approximated(portgraph, vesselpool, week_predictor=week_predictor)
+			the_node.graph.solve_approximated(portgraph, vesselpool,
+					week_predictor=week_predictor, min_cost=self.min_cost)
 			# Check stopping
 			sum_weight *= discount_fac
 			sum_weight += 1
@@ -419,6 +421,7 @@ class MonteCarloTree:
 
 	num_expand: int
 	num_rollout: int
+	min_cost: bool
 
 	def __init__(self, servicegraph: ServiceGraph,
 			portgraph: PortGraph,
@@ -442,13 +445,14 @@ class MonteCarloTree:
 
 		self.num_expand = 0
 		self.num_rollout = 0
+		self.min_cost = min_cost
 
 	def run(self, epochs: int, display: bool=False):
 		"""
 		Input:
 			- c_param: must be strictly positive
 		"""
-		recorder={
+		recorder = {
 					'num_expand': self.num_expand,
 					'num_rollout': self.num_rollout
 				}
@@ -505,8 +509,12 @@ class MonteCarloTree:
 			print(action.explain(portgraph, the_node.graph, idx_action + 1))
 			print(f'Siblings = {len(the_node.children)}')
 			print(f'N visits = {the_child.number_of_visits}')
-			print(f'Original cost = {the_node.graph.total_cost()}')
-			print(f'Updated cost  = {the_child.graph.total_cost()}\n')
+			if self.min_cost:
+				print(f'Original cost = {the_node.graph.total_cost()}')
+				print(f'Updated cost  = {the_child.graph.total_cost()}\n')
+			else:
+				print(f'Original profit = {the_node.graph.total_profit()}')
+				print(f'Updated profit  = {the_child.graph.total_profit()}\n')
 			the_node = the_child
 
 	# def is_fully_expand(self):
