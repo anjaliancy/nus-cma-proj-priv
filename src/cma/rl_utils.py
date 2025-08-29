@@ -11,6 +11,7 @@ class MatrixAnalyzer:
 	def __init__(self, matrix: list[np.ndarray]):
 		"""
 		Initialize the analyzer with a matrix T.
+
 		Input:
 			Out-degree adjoint matrix, k by N by N, where k denotes for the number of service lines
 			and n denotes for the number of ports

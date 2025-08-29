@@ -17,22 +17,24 @@ class Vessel:
 
 	The ships that transfer goods
 	"""
-	vessel_rank: int
-	vessel_class: Tuple[int, int]
-	vessel_capacity: float
-	vessel_draft: float
-	daily_chartering_cost: float
-	bunkering_cost_coefs: pd.DataFrame
-	unit_bunkering_cost: float
+	__slots__ = [
+		'vessel_rank',				# int
+		'vessel_class',				# Tuple[int, int]
+		'vessel_capacity',			# float
+		'vessel_draft',				# float
+		'daily_chartering_cost',	#
+		'bunkering_cost_coefs',		# pd.DataFrame
+		'unit_bunkering_cost'		# float
+	]
 
 	def __init__(self,
 			v_rank: int,               # from 1 to 13
 			v_class: Tuple[int, int],  # `100 - 499`
-			capacity,
-			draft,
+			capacity: float,
+			draft: float,
 			daily_chartering_cost,
 			bunkering_cost_coefs,
-			unit_bunkering_cost
+			unit_bunkering_cost: float
 	):
 		self.vessel_rank = v_rank
 		self.vessel_class = v_class
