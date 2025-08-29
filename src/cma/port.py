@@ -316,11 +316,15 @@ class PortGraph(PortPool):
 	__mat_distance: np.ndarray
 	__mat_demand: np.ndarray
 	__mat_unit_revenue: np.ndarray | None
+	__mat_IsPanama: np.ndarray | None
+	__mat_IsSuez: np.ndarray | None
 
 	def __init__(self, ports_pool: PortPool,
 			mat_distance: list[list[float]] | np.ndarray,
 			mat_demand: list[list[float]] | np.ndarray,
 			mat_unit_revenue: list[list[float]] | np.ndarray | None = None,
+			mat_IsPanama: list[list[float]] | np.ndarray | None = None,
+			mat_IsSuez: list[list[float]] | np.ndarray | None = None,
 			filter_by_demand=True):
 		"""
 		Input:
@@ -334,6 +338,14 @@ class PortGraph(PortPool):
 			self.__mat_unit_revenue = np.array(mat_unit_revenue)[:ports_number, :ports_number]
 		else:
 			self.__mat_unit_revenue = None
+		if mat_IsPanama is not None:
+			self.__mat_IsPanama = np.array(mat_IsPanama)[:ports_number, :ports_number]
+		else:
+			self.__mat_IsPanama = None
+		if mat_IsSuez is not None:
+			self.__mat_IsSuez = np.array(mat_IsSuez)[:ports_number, :ports_number]
+		else:
+			self.__mat_IsSuez = None
 
 		if filter_by_demand:
 			od_pairs = self.get_all_od_pairs()
@@ -346,8 +358,11 @@ class PortGraph(PortPool):
 			sub_demands = self.get_filtered_demand_matrix(sub_ports)
 			sub_distance = self.get_filtered_distance_matrix(sub_ports)
 			if self.__mat_unit_revenue is not None:
-				sub_unit_revenue = self.get_filtered_demand_unit_matrix(sub_ports)
-				self.__mat_unit_revenue = sub_unit_revenue
+				self.__mat_unit_revenue = self.get_filtered_demand_unit_matrix(sub_ports)
+			if self.__mat_IsPanama is not None:
+				self.__mat_unit_revenue = self.get_filtered_isPanama_matrix(sub_ports)
+			if self.__mat_IsSuez is not None:
+				self.__mat_unit_revenue = self.get_filtered_isSuez_matrix(sub_ports)
 			super().update(sub_ports)
 			self.__mat_demand = sub_demands
 			self.__mat_distance = sub_distance
@@ -380,6 +395,18 @@ class PortGraph(PortPool):
 			return None
 		else:
 			return self.__mat_unit_revenue[port_i_idx, port_j_idx]
+
+	def isPanama_by_idx(self, port_i_idx: int, port_j_idx: int) -> bool | None:
+		if self.__mat_IsPanama is None:
+			return None
+		else:
+			return self.__mat_IsPanama[port_i_idx, port_j_idx]
+
+	def isSuez_by_idx(self, port_i_idx: int, port_j_idx: int) -> bool | None:
+		if self.__mat_IsSuez is None:
+			return None
+		else:
+			return self.__mat_IsSuez[port_i_idx, port_j_idx]
 
 	def get_demand_flows(self) -> tuple[np.ndarray, np.ndarray]:
 		"""return:
@@ -416,6 +443,18 @@ class PortGraph(PortPool):
 			ValueError("`Portgraph.get_filtered_demand_unit_matrix`: self.__mat_unit_revenue is None")
 		indeces = [self.get_unique_index(p) for p in ports]
 		return self.__mat_unit_revenue[indeces, :][:, indeces]  # type: ignore
+
+	def get_filtered_isPanama_matrix(self, ports: list[Port]) -> np.ndarray:
+		if self.__mat_IsPanama is None:
+			ValueError("`Portgraph.get_filtered_isPanama_matrix`: self.__mat_IsPanama is None")
+		indeces = [self.get_unique_index(p) for p in ports]
+		return self.__mat_IsPanama[indeces, :][:, indeces]  # type: ignore
+
+	def get_filtered_isSuez_matrix(self, ports: list[Port]) -> np.ndarray:
+		if self.__mat_IsSuez is None:
+			ValueError("`Portgraph.get_filtered_isSuez_matrix`: self.__mat_IsSuez is None")
+		indeces = [self.get_unique_index(p) for p in ports]
+		return self.__mat_IsSuez[indeces, :][:, indeces]  # type: ignore
 
 	def filtered_by_sub_portpool(self, sub_portpool: PortPool):
 		indeces: list[int] = []

@@ -8,7 +8,7 @@ from cma import create_service_line
 from cma import read_port_data as cma_read_port_data
 
 df_demand = pd.read_csv('./LINERLIB/data/Demand_Pacific.csv', sep='\t')
-df_vessel = pd.read_csv('./LINERLIB/data/fleet_Data.csv', sep='\t')
+df_vessel = pd.read_csv('./LINERLIB/data/fleet_data.csv', sep='\t')
 df_vessel_num = pd.read_csv('./LINERLIB/data/fleet_Pacific.csv', sep='\t')
 df_ports = pd.read_csv('./LINERLIB/data/ports.csv', sep='\t')
 df_demand = pd.read_csv('./LINERLIB/data/Demand_Pacific.csv', sep='\t')
@@ -34,6 +34,9 @@ def read_vessel_class_data() -> VesselPool:
 			}],
 			600  # unit bunkering cost by the data
 		)
+		vessel.idle_bunkering_cost = row['Idle Consumption ton/day']
+		vessel.min_speed = row['minSpeed']
+		vessel.max_speed = row['maxSpeed']
 		vessel_lst.append(vessel)
 		idx_row += 1
 
@@ -48,7 +51,7 @@ def read_vessel_class_data() -> VesselPool:
 	return VesselPool(vessel_lst, number_lst)
 
 
-def read_demand(portpool: PortPool) -> tuple[np.ndarray, np.ndarray]:
+def read_demand(portpool: PortPool):
 	"""
 	"""
 	port_mapping = {
@@ -56,16 +59,24 @@ def read_demand(portpool: PortPool) -> tuple[np.ndarray, np.ndarray]:
 	}
 	week_demands = np.ones((len(port_mapping), len(port_mapping))) * 0.0
 	unit_revenue = np.ones((len(port_mapping), len(port_mapping))) * 0.0
+	#mat_IsPanama = np.ones((len(port_mapping), len(port_mapping))) * 0
+	#mat_IsSuez = np.ones((len(port_mapping), len(port_mapping))) * 0
 
 	for _, row in df_demand.iterrows():
 		from_port = port_mapping.get(row['Origin'], -1)
 		to_port = port_mapping.get(row['Destination'], -1)
 		week_amount = row['FFEPerWeek']
 		revenue_per_unit = row['Revenue_1']
+		#is_Panama = row['IsPanama']
+		#is_Suez = row['IsSuez']
 		if from_port >= 0 and to_port >= 0:
 			week_demands[from_port, to_port] += week_amount
 			unit_revenue[from_port, to_port] += revenue_per_unit
-	return week_demands, unit_revenue
+			# if is_Panama > 0:
+			# 	mat_IsPanama[from_port, to_port] = 1
+			# if is_Suez > 0:
+			# 	mat_IsSuez[from_port, to_port] = 1
+	return week_demands, unit_revenue #, mat_IsPanama, mat_IsSuez
 
 
 def read_port_data(vesselpool: VesselPool, cma_portpool: PortPool) -> PortPool:

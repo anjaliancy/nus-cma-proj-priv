@@ -1061,23 +1061,27 @@ class ServiceGraph:
 		"""
 		n_lines = len(self.__lines_list)
 		n_vessel_class = len(vesselpool.vessels_list)
-		middle_speed = 15
+		middle_speed = 16  # between 12-19, see LINERLIB Data `fleet_data.csv`
 
 		# initial prediction of weeks
-		week_vars_pred = [0.0 for _ in self.__lines_list]
+		week_vars = [0.0 for _ in self.__lines_list]
 		for idx_line, line in enumerate(self.__lines_list):
-			line_week_tmp = line.get_distance(portgraph) / (middle_speed * 24 * 7)
-			if line_week_tmp > 100000:
+			line_sailing_days = line.get_distance(portgraph) / (middle_speed * 24)
+			if line_sailing_days > 100000:
 				print('>>> `optimize_profit`', line, line.get_distance(portgraph), middle_speed)
-			week_vars_pred[idx_line] = int(line_week_tmp) + 1
-		week_vars = apply_prediction(model, self.__lines_list, portgraph, vesselpool)
-		for idx_week_i, week_i in enumerate(week_vars):
-			if week_i < week_vars_pred[idx_week_i] - 2:
-				week_vars[idx_week_i] = week_vars_pred[idx_week_i] - 1
+			line_week = int(round(line_sailing_days / 6))
+			if line_week == 0:
+				line_week = 1/2
+			week_vars[idx_line] = line_week
+		# week_vars = apply_prediction(model, self.__lines_list, portgraph, vesselpool)
+		# for idx_week_i, week_i in enumerate(week_vars):
+		# 	if week_i < week_vars_pred[idx_week_i] - 2:
+		# 		week_vars[idx_week_i] = week_vars_pred[idx_week_i] - 1
 
 		line_speeds = np.array([0 for _ in range(n_lines)])
 		sol = { 'speeds': line_speeds, 'weeks': week_vars }
-		while not all(10 <= x <= 18 for x in line_speeds):
+		adj_rounds = 2
+		while adj_rounds > 0 and (not all(12 <= x <= 19 for x in line_speeds)):
 			sol = self._solve_optimize_profit2_problem(
 				week_vars,
 				n_lines, n_vessel_class,
@@ -1085,10 +1089,11 @@ class ServiceGraph:
 			)
 			line_speeds = sol['speeds']
 			for idx_line, speed in enumerate(line_speeds):
-				if speed < 10:
+				if speed < 12:  # LINERLIB Data
 					week_vars[idx_line] -= 1
-				if speed > 18:
+				if speed > 19:  # LINERLIB Data
 					week_vars[idx_line] += 1
+			adj_rounds -= 1
 		return sol
 
 
@@ -1218,12 +1223,22 @@ class ServiceGraph:
 		obj_expr -= total_transshipment_cost
 
 		# 3. Weekly Bunkering Cost
-		total_bunkering_cost = 0
+		total_bunkering_cost_sail = 0
+		total_bunkering_cost_idle = 0
+		unit_bunkering_cost_idle = vesselpool.get_bunkering_cost_idle()
+		unit_bunkering_cost_middle = vesselpool.get_bukering_cost_middle()
+
 		for idx_line, line in enumerate(self.__lines_list):
-			sailing_days = 5.5  # suppose stay in port for 1.5 days a week
+			sailing_days = 6.0    # suppose stay in port for 24h a week on average
+			port_stay_days = 1.0  # this assumption is based on the paper (pp.298)
 			line_ship_vars = ship_vars[idx_line, :]   # shape = (rank,)
-			total_bunkering_cost += line_ship_vars * sailing_days @ vesselpool.get_bukering_cost_middle()
-		obj_expr -= total_bunkering_cost
+			## 3.1. bunkering cost of sailing
+			total_bunkering_cost_sail += line_ship_vars * sailing_days @ unit_bunkering_cost_middle
+			## 3.2. bunkering cost at port (idle)
+			total_bunkering_cost_idle += line_ship_vars * port_stay_days @ unit_bunkering_cost_idle
+
+		obj_expr -= total_bunkering_cost_sail
+		obj_expr -= total_bunkering_cost_idle
 
 		# 4. Weekly Port Call Cost
 		total_portcall_cost = 0
@@ -1235,6 +1250,14 @@ class ServiceGraph:
 				line_portcall_cost += line_ships @ portcall_cost_rates
 			total_portcall_cost += line_portcall_cost / week_vars[idx_line]
 		obj_expr -= total_portcall_cost
+
+		# 5. Canal Cost
+		## Note: The LINERLIB dataset does NOT provide a detailed canal cost unit data.
+		##       According to `dist_dense.csv`, it seems the canal cost is OD pair
+		##       related. Hence, it is indenpent with the network. Thus, we just use
+		##       the cost value in their solution.
+		total_canal_cost = 230400
+		obj_expr -= total_canal_cost
 
 		# 5. Revenue
 		total_revenue = 0
@@ -1308,10 +1331,12 @@ class ServiceGraph:
 			'port staying days': matrix_stay_days,
 			'chartering cost': total_charter_costs,
 			'transshipment cost': total_transshipment_cost,
-			'bunkering cost': total_bunkering_cost,
+			'bunkering cost (sail)': total_bunkering_cost_sail,
+			'bunkering cost (idle)': total_bunkering_cost_idle,
 			'portcall cost': total_portcall_cost,
 			'revenue': total_revenue,
 			'penalty': total_penalty,
+			'canal cost': total_canal_cost,
 		}
 
 

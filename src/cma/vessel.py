@@ -24,7 +24,10 @@ class Vessel:
 		'vessel_draft',				# float
 		'daily_chartering_cost',	#
 		'bunkering_cost_coefs',		# pd.DataFrame
-		'unit_bunkering_cost'		# float
+		'idle_bunkering_cost',		# float
+		'unit_bunkering_cost',		# float
+		'min_speed',
+		'max_speed',
 	]
 
 	def __init__(self,
@@ -42,7 +45,10 @@ class Vessel:
 		self.vessel_draft = draft
 		self.daily_chartering_cost = daily_chartering_cost
 		self.bunkering_cost_coefs = pd.DataFrame(bunkering_cost_coefs)
+		self.idle_bunkering_cost = 0.0
 		self.unit_bunkering_cost = unit_bunkering_cost
+		self.min_speed = 10  # cma data
+		self.max_speed = 18  # cma data
 
 	def __repr__(self) -> str:
 		return 'Rank ' + str(self.vessel_rank) + ' Vessel'
@@ -91,6 +97,15 @@ class VesselPool:
 			df_nrow = df.shape[0]
 			cost = df.at[df_nrow // 2, 'consumption'] * vessel.unit_bunkering_cost
 			re.append(cost)
+		return re
+
+	def get_bunkering_cost_idle(self) -> list[float]:
+		"""
+		A list of bukering cost for each vessel class staying at port (ton/day)
+		"""
+		re = []
+		for vessel in self.vessels_list:
+			re.append(vessel.idle_bunkering_cost * vessel.unit_bunkering_cost)
 		return re
 
 	def get_chartering_costs(self) -> list[float]:
