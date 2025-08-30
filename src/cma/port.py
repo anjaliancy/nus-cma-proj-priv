@@ -47,11 +47,11 @@ class Port:
 			fit_vessel_ranks: dict[int, int],      # vessel rank : number
 			berth_productivity: dict[int, float],  # vessel rank : productivity
 			cost_portcall: dict[int, float],       # vessel rank : average cost
-			cost_transship: float,                 #
-			cost_storage: float,                   #
-			transshipment_capacity: bool,          #
-			max_draft: float,                      #
-			max_daily_call: int,                   #
+			cost_transship: float,
+			cost_storage: float,
+			transshipment_capacity: bool,
+			max_draft: float,
+			max_daily_call: int,
 			max_line_visit: int=2                  # max number of visits for each line
 	):
 		self.__id = port_id

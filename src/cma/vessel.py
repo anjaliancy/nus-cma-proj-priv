@@ -22,12 +22,12 @@ class Vessel:
 		'vessel_class',				# Tuple[int, int]
 		'vessel_capacity',			# float
 		'vessel_draft',				# float
-		'daily_chartering_cost',	#
+		'daily_chartering_cost',	# float
 		'bunkering_cost_coefs',		# pd.DataFrame
 		'idle_bunkering_cost',		# float
 		'unit_bunkering_cost',		# float
-		'min_speed',
-		'max_speed',
+		'min_speed',				# float
+		'max_speed',				# float
 	]
 
 	def __init__(self,
@@ -35,8 +35,8 @@ class Vessel:
 			v_class: Tuple[int, int],  # `100 - 499`
 			capacity: float,
 			draft: float,
-			daily_chartering_cost,
-			bunkering_cost_coefs,
+			daily_chartering_cost: float,
+			bunkering_cost_coefs: list[dict],  # List[{'speed': int, 'consumption': float}]
 			unit_bunkering_cost: float
 	):
 		self.vessel_rank = v_rank
