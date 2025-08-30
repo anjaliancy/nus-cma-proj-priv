@@ -60,6 +60,9 @@ class GraphAction:
 		return LineAction(self.cmd, self.loc)
 
 	def explain(self, portgraph: PortGraph, servicegraph: 'ServiceGraph', action_number:int|None=None) -> str:
+		"""
+		Pretty display: return a string of all necessary info
+		"""
 		lines = servicegraph.tolist_serviceLine()
 		if action_number is None:
 			re: str = 'Action:\n'
@@ -169,11 +172,17 @@ class ServiceGraph:
 		return list(seg_union), all_service_slots
 
 	def get_adjacency_matrices(self, portgraph: PortGraph) -> list[np.ndarray]:
+		"""
+		Ask Xuefei about the concept of `adjacency matrices`
+		"""
 		returned_adjs: list[np.ndarray] = []
 		returned_adjs.extend(line.get_adjacency_matrix(portgraph) for line in self.__lines_list)
 		return returned_adjs
 
 	def add_servicelines(self, newlines: list[ServiceLine]):
+		"""
+		Add a service line to the current graph
+		"""
 		for l in newlines:
 			if l not in self.__lines_list:
 				self.__lines_list.append(l)
@@ -183,6 +192,9 @@ class ServiceGraph:
 # region - Actions related ######################################################
 #
 	def update_by_graph_action(self, graph_action: GraphAction, portgraph: PortGraph) -> 'ServiceGraph':
+		"""
+		Update the current graph by a Graph Action
+		"""
 		old_line = self.__lines_list[graph_action.idx_line]
 		line_action = graph_action.get_line_action(old_line, portgraph)
 		new_line = old_line.apply_action(line_action, portgraph)
@@ -192,6 +204,9 @@ class ServiceGraph:
 		return ServiceGraph(new_services)
 
 	def get_feasible_actions(self, portgraph: PortGraph):
+		"""
+		Return all feasible actions
+		"""
 		analyzer = MatrixAnalyzer(self.get_adjacency_matrices(portgraph))
 		actions_dict = analyzer.find_valid_k(portgraph)
 		actions_list = [
@@ -207,6 +222,8 @@ class ServiceGraph:
 # region - Path related #########################################################
 #
 	def get_isolated_ports(self, portgraph: PortGraph) -> list[Port]:
+		"""Return a list of ports that is not connected to `portgraph`
+		"""
 		connected_ports = set()
 		for line in self.__lines_list:
 			line_ports = set(line.tolist_port())
@@ -215,6 +232,9 @@ class ServiceGraph:
 		return list(fullports.difference(connected_ports))
 
 	def get_all_lines_contains(self, ports: list[Port]) -> list[ServiceLine]:
+		"""
+		return a set of all lines
+		"""
 		re = set()
 		for line in self.__lines_list:
 			for port in ports:
@@ -370,7 +390,7 @@ class ServiceGraph:
 				'BigM-portcall_cost': 2e9     # unavailable dummy is 1e6, at most 200 calls in a line
 			}
 		):
-		"""To Do...
+		"""Solve either the cost-min or profit-max problem
 		"""
 		trans_ports = portgraph.filtered_by_transship_capacity()
 		od_pairs_dict = self.get_all_paths(portgraph, trans_ports)
@@ -440,7 +460,7 @@ class ServiceGraph:
 			}
 		) -> dict:
 		"""
-		Optimization Problem:
+		Optimization Problem (Cost min):
 
 		1. Key Decision Variables
 
@@ -1058,6 +1078,7 @@ class ServiceGraph:
 			model: RegressionResultsWrapper,
 	) -> dict:
 		"""
+		Solve the profit maximization problem
 		"""
 		n_lines = len(self.__lines_list)
 		n_vessel_class = len(vesselpool.vessels_list)
@@ -1096,7 +1117,6 @@ class ServiceGraph:
 			adj_rounds -= 1
 		return sol
 
-
 	def _solve_optimize_profit2_problem(self,
 			week_vars,
 			n_lines: int, n_vessel_class: int,
@@ -1106,6 +1126,7 @@ class ServiceGraph:
 			od_pair_paths: list[list[Path]],
 	):
 		"""
+		Solve the profit maximization problem (taking `weeks` as given)
 		"""
 		constraints = []
 		obj_expr = 0.0

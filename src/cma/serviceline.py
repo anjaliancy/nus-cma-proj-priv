@@ -20,7 +20,6 @@ from .port import Port, PortPool, PortGraph
 
 class Segment:
 	"""class Segment
-
 	"""
 	first: Port
 	second: Port
@@ -140,6 +139,9 @@ class Path:
 		return len(self.__data)
 
 	def get_hubs(self) -> list[Port]:
+		"""
+		`Hub` means a port for transshipment
+		"""
 		services = set()
 		hubs = []
 		for slot in self.__data:
@@ -268,6 +270,8 @@ class ServiceLine:
 		return self.__name + ' -- ' + str(self.__line)
 
 	def check_valid(self, warn=True) -> bool:
+		"""Check whether the service line is a valid one
+		"""
 		# Case 1: include less than 2 ports
 		#
 		# we allow for this kind of action since it means to delete the service line
@@ -302,7 +306,8 @@ class ServiceLine:
 		return True
 
 	def get_adjacency_matrix(self, ports_pool: PortPool) -> np.ndarray:
-		"""Get out-degree matrix
+		"""Return:
+			out-degree matrix
 		"""
 		n = ports_pool.get_number_of_ports()
 		adj = np.zeros((n, n))
@@ -374,6 +379,8 @@ class ServiceLine:
 			return idx + 1
 
 	def idx_of_prev_idx(self, idx: int) -> int:
+		"""Similar to above
+		"""
 		if idx == 0:
 			return self.number_of_port() - 1
 		else:
@@ -392,6 +399,8 @@ class ServiceLine:
 		return self.__line[self.idx_of_next_idx(idx)]
 
 	def prev_port_of_idx(self, idx: int) -> Port:
+		"""Similar to above
+		"""
 		return self.__line[self.idx_of_prev_idx(idx)]
 
 	def plot(self, selected_countries: list[str], fig_size = (15, 9), eps = 2, center_pacific=False):
@@ -474,6 +483,8 @@ class ServiceLine:
 	###########################################################################
 
 	def tolist_slot(self) -> list[Slot]:
+		"""Turn the servise line into a list of slots
+		"""
 		re = []
 		if self.number_of_port() <= 1:
 			return re
@@ -484,6 +495,8 @@ class ServiceLine:
 		return re
 
 	def get_slot_by_idx(self, idx: int) -> Slot:
+		"""Return the indexed slot
+		"""
 		return Slot(self, (self.__line[idx], self.next_port_of_idx(idx)))
 
 	def get_segment_idx(self, seg: Segment) -> int:
@@ -502,6 +515,8 @@ class ServiceLine:
 		return -1
 
 	def has_slot(self, port_i: Port, port_j: Port) -> bool:
+		"""Check whether the service line has the slot from `port_i` to `port_j`
+		"""
 		if self.__line[-1] == port_i and self.__line[0] == port_j:
 			return True
 		for idx, port in enumerate(self.__line):
@@ -510,6 +525,8 @@ class ServiceLine:
 		return False
 
 	def has_slot_by_id(self, id_i: str, id_j: str, port_pool: PortPool) -> bool:
+		"""Similar to above
+		"""
 		return self.has_slot(port_pool.get_port(id_i), port_pool.get_port(id_j))
 
 
@@ -523,6 +540,8 @@ class ServiceLine:
 	###########################################################################
 
 	def get_slot_list_by_index(self, idx_1: int, idx_2: int) -> list[Slot]:
+		"""Get a list of slot in this service from `start` to `end`
+		"""
 		if idx_1 >= self.number_of_port():
 			raise ValueError(f'Index "{idx_1}" not in Service')
 		if idx_2 >= self.number_of_port():
@@ -654,7 +673,7 @@ class ServiceLine:
 def create_service_line(
 		name: str, port_ids: list[str], portpool: PortPool
 ) -> ServiceLine:
-	"""
+	"""Create a service line from a list of port IDs
 	"""
 	port_lst = []
 	for port_id in port_ids:

@@ -126,6 +126,8 @@ class MonteCarloTreeSearchNode:
 		return 1 + sum(child.total_number_of_sub_nodes() for child in self.children)
 
 	def best_sub_node(self, portgraph: PortGraph) -> 'MonteCarloTreeSearchNode':
+		"""Find the node with smallest cost / highest profit
+		"""
 		the_node = self
 		the_node_reward = the_node.current_state_reward()
 		for child in the_node.children:
@@ -138,6 +140,8 @@ class MonteCarloTreeSearchNode:
 		return the_node
 
 	def best_sub_node_byucb(self, portgraph: PortGraph, c_param: float) -> 'MonteCarloTreeSearchNode':
+		"""Find the node with highest UCB
+		"""
 		the_node = self
 		the_node_ucb_v = the_node.pucb(c_param)
 		for child in the_node.children:
@@ -432,8 +436,9 @@ class MonteCarloTree:
 			min_cost: bool=True,
 			week_predict_model: None | RegressionResultsWrapper = None):
 		'''
-		Input:
+		Selected Inputs:
 			`max_depth`: depth of root is zero
+			`min_cost` : cost minimization or profit maximization
 		'''
 		self.root_node = MonteCarloTreeSearchNode(servicegraph, portgraph, 1, min_cost, None)
 		self.portgraph = portgraph

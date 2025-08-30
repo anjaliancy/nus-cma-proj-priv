@@ -225,6 +225,7 @@ def randomly_create_lines(
 		line_num: int
 	) -> list[ServiceLine]:
 	"""
+	Randomly create a service graph without reading any data
 	"""
 	current_lines = []
 	port_num = portpool.get_number_of_ports()

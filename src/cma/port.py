@@ -315,9 +315,9 @@ class PortGraph(PortPool):
 	"""
 	__mat_distance: np.ndarray
 	__mat_demand: np.ndarray
-	__mat_unit_revenue: np.ndarray | None
-	__mat_IsPanama: np.ndarray | None
-	__mat_IsSuez: np.ndarray | None
+	__mat_unit_revenue: np.ndarray | None    # price of unit demand
+	__mat_IsPanama: np.ndarray | None        # not important
+	__mat_IsSuez: np.ndarray | None          # not important
 
 	def __init__(self, ports_pool: PortPool,
 			mat_distance: list[list[float]] | np.ndarray,
@@ -368,6 +368,8 @@ class PortGraph(PortPool):
 			self.__mat_distance = sub_distance
 
 	def get_pairs_missing_distance(self) -> list[tuple[int, int]]:
+		"""return those OD pairs whose distance is missing
+		"""
 		o_arr, d_arr = np.where(np.isinf(self.__mat_distance))
 		pairs = [(o, d) for o, d in zip(o_arr, d_arr)]
 		return pairs
@@ -431,14 +433,20 @@ class PortGraph(PortPool):
 		return self.__mat_demand[port_i_idx, port_j_idx]
 
 	def get_filtered_demand_matrix(self, ports: list[Port]) -> np.ndarray:
+		"""filter the default demand matrix with another portpool
+		"""
 		indeces = [self.get_unique_index(p) for p in ports]
 		return self.__mat_demand[indeces, :][:, indeces]
 
 	def get_filtered_distance_matrix(self, ports: list[Port]) -> np.ndarray:
+		"""filter the default distance matrix with another portpool
+		"""
 		indeces = [self.get_unique_index(p) for p in ports]
 		return self.__mat_distance[indeces, :][:, indeces]
 
 	def get_filtered_demand_unit_matrix(self, ports: list[Port]) -> np.ndarray:
+		"""filter the default unit demand price matrix with another portpool
+		"""
 		if self.__mat_unit_revenue is None:
 			ValueError("`Portgraph.get_filtered_demand_unit_matrix`: self.__mat_unit_revenue is None")
 		indeces = [self.get_unique_index(p) for p in ports]
@@ -457,13 +465,25 @@ class PortGraph(PortPool):
 		return self.__mat_IsSuez[indeces, :][:, indeces]  # type: ignore
 
 	def filtered_by_sub_portpool(self, sub_portpool: PortPool):
+		"""filter the port graph by a sub port pool
+		"""
 		indeces: list[int] = []
 		for p in sub_portpool.tolist_port():
 			if self.has_port_by_id(p.get_id()):
 				indeces.append(self.get_unique_index(p))
 		sub_mat_demand = self.__mat_demand[indeces, :][:, indeces]
 		sub_mat_distance = self.__mat_distance[indeces, :][:, indeces]
-		return PortGraph(sub_portpool, sub_mat_distance, sub_mat_demand)
+		sub_mat_unit_rev = None
+		sub_mat_isPanama = None
+		sub_mat_isSuez = None
+		if self.__mat_unit_revenue is not None:
+			sub_mat_unit_rev = self.__mat_unit_revenue[indeces, :][:, indeces]
+		if self.__mat_IsPanama is not None:
+			sub_mat_isPanama = self.__mat_IsPanama[indeces, :][:, indeces]
+		if self.__mat_IsSuez is not None:
+			sub_mat_isSuez = self.__mat_IsSuez[indeces, :][:, indeces]
+		return PortGraph(sub_portpool, sub_mat_distance, sub_mat_demand,
+				sub_mat_unit_rev, sub_mat_isPanama, sub_mat_isSuez)
 
 	def plot(self, selected_countries: list[str],
 				plot_port_id: bool=False, display_info=False, center_pacific=False,
