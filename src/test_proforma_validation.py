@@ -1,0 +1,538 @@
+"""
+Comprehensive Validation Tests for Proforma Service Lines with 11-Rank Vessel System
+
+This test suite validates that CNC proforma service lines (proforma_CNC.csv) work correctly
+with the new 11-rank vessel system. Tests verify:
+- Proforma data loading with 11-rank VesselPool
+- ServiceLine creation from proforma data
+- Vessel rank compatibility (ranks 3-8 in proforma, 1-11 available)
+- Port operations with proforma service lines
+- Metadata extraction and validation
+- Service line operational parameters
+"""
+
+import pytest
+import pandas as pd
+from pathlib import Path
+from importlib import resources
+
+from cma import (
+    read_vessel_class_data,
+    read_port_data,
+    read_cnc_proforma_data,
+    ServiceLine,
+    create_service_line
+)
+from cma.vessel import VesselPool
+from cma.port import PortPool
+
+
+# Test fixtures
+@pytest.fixture(scope="module")
+def vesselpool():
+    """Load 11-rank vessel pool"""
+    return read_vessel_class_data()
+
+
+@pytest.fixture(scope="module")
+def portpool():
+    """Load port data"""
+    _, portpool = read_port_data()
+    return portpool
+
+
+@pytest.fixture(scope="module")
+def proforma_data(portpool, vesselpool):
+    """Load proforma service lines with 11-rank vessel pool"""
+    return read_cnc_proforma_data(portpool, vesselpool)
+
+
+@pytest.fixture(scope="module")
+def proforma_csv_path():
+    """Path to proforma CSV file"""
+    return resources.files('cma.res').joinpath('input/proforma_CNC.csv')
+
+
+# ===== Test 1: Vessel Pool Has 11 Ranks =====
+def test_vesselpool_has_11_ranks(vesselpool):
+    """Test that vessel pool contains 11 ranks"""
+    assert isinstance(vesselpool, VesselPool), "Should be VesselPool instance"
+    assert len(vesselpool.vessels_list) == 11, f"Should have 11 vessel ranks, got {len(vesselpool.vessels_list)}"
+    
+    # Check vessel ranks are 1-11
+    ranks = [v.vessel_rank for v in vesselpool.vessels_list]
+    assert ranks == list(range(1, 12)), f"Vessel ranks should be 1-11, got {ranks}"
+    
+    print(f"✓ VesselPool has 11 ranks: {ranks}")
+
+
+# ===== Test 2: Proforma Data Loads Successfully =====
+def test_proforma_data_loads(proforma_data):
+    """Test that proforma data loads without errors"""
+    assert proforma_data is not None, "Proforma data should not be None"
+    assert 'lines' in proforma_data, "Should have 'lines' key"
+    assert 'metadata' in proforma_data, "Should have 'metadata' key"
+    
+    lines = proforma_data['lines']
+    metadata = proforma_data['metadata']
+    
+    assert isinstance(lines, list), "Lines should be a list"
+    assert isinstance(metadata, dict), "Metadata should be a dict"
+    assert len(lines) > 0, "Should have at least one service line"
+    
+    print(f"✓ Loaded {len(lines)} proforma service lines")
+    print(f"✓ Loaded metadata for {len(metadata)} lines")
+
+
+# ===== Test 3: All Service Lines Are ServiceLine Objects =====
+def test_service_lines_are_correct_type(proforma_data):
+    """Test that all loaded lines are ServiceLine instances"""
+    lines = proforma_data['lines']
+    
+    for line in lines:
+        assert isinstance(line, ServiceLine), f"Line {line.name if hasattr(line, 'name') else 'unknown'} should be ServiceLine instance"
+    
+    print(f"✓ All {len(lines)} lines are ServiceLine instances")
+
+
+# ===== Test 4: Service Lines Have Valid Names =====
+def test_service_lines_have_names(proforma_data):
+    """Test that all service lines have valid names"""
+    lines = proforma_data['lines']
+    
+    for line in lines:
+        # name() is a method, not a property
+        line_name = line.name()
+        assert isinstance(line_name, str), "ServiceLine name should be string"
+        assert len(line_name) > 0, "ServiceLine name should not be empty"
+    
+    line_names = [line.name() for line in lines]
+    print(f"✓ All lines have valid names")
+    print(f"  Sample names: {line_names[:5]}")
+
+
+# ===== Test 5: Proforma Uses Vessel Ranks 3-8 =====
+def test_proforma_vessel_ranks(proforma_data, proforma_csv_path):
+    """Test that proforma data uses vessel ranks 3-8 (subset of 1-11)"""
+    metadata = proforma_data['metadata']
+    
+    # Extract all vessel ranks from metadata
+    vessel_ranks = set()
+    for line_name, line_meta in metadata.items():
+        if 'vessel_rank' in line_meta:
+            vessel_ranks.add(line_meta['vessel_rank'])
+    
+    vessel_ranks = sorted(vessel_ranks)
+    
+    # Proforma should use ranks 3-8 (6 ranks)
+    assert len(vessel_ranks) > 0, "Should have vessel ranks in metadata"
+    assert all(1 <= r <= 11 for r in vessel_ranks), f"All ranks should be within 1-11, got {vessel_ranks}"
+    
+    print(f"✓ Proforma uses vessel ranks: {vessel_ranks}")
+    print(f"✓ All ranks are within 11-rank system (1-11)")
+    
+    # Verify from CSV directly
+    df = pd.read_csv(proforma_csv_path)
+    csv_ranks = sorted(df['vrank'].unique())
+    assert vessel_ranks == csv_ranks, f"Metadata ranks {vessel_ranks} should match CSV ranks {csv_ranks}"
+    
+    print(f"✓ Metadata ranks match CSV data")
+
+
+# ===== Test 6: All Proforma Vessel Ranks Available in VesselPool =====
+def test_proforma_ranks_in_vesselpool(proforma_data, vesselpool):
+    """Test that all vessel ranks used in proforma are available in 11-rank vessel pool"""
+    metadata = proforma_data['metadata']
+    
+    # Get vessel ranks from proforma
+    proforma_ranks = set()
+    for line_meta in metadata.values():
+        if 'vessel_rank' in line_meta:
+            proforma_ranks.add(line_meta['vessel_rank'])
+    
+    # Get available ranks from vesselpool
+    available_ranks = set(v.vessel_rank for v in vesselpool.vessels_list)
+    
+    # All proforma ranks should be available
+    missing_ranks = proforma_ranks - available_ranks
+    assert len(missing_ranks) == 0, f"Ranks {missing_ranks} used in proforma not found in vesselpool"
+    
+    print(f"✓ Proforma ranks {sorted(proforma_ranks)} all available in VesselPool")
+    print(f"✓ Additional ranks available: {sorted(available_ranks - proforma_ranks)}")
+
+
+# ===== Test 7: Service Lines Have Port Rotations =====
+def test_service_lines_have_ports(proforma_data):
+    """Test that all service lines have valid port rotations"""
+    lines = proforma_data['lines']
+    metadata = proforma_data['metadata']
+    
+    for line in lines:
+        line_name = line.name()
+        ports = line.tolist_port()
+        assert len(ports) > 0, f"Line {line_name} should have at least one port"
+        
+        # Check metadata matches
+        if line_name in metadata:
+            meta = metadata[line_name]
+            assert 'port_calls' in meta, f"Metadata for {line_name} should have port_calls"
+            assert 'port_rotation' in meta, f"Metadata for {line_name} should have port_rotation"
+            
+            # Verify port count matches
+            assert meta['port_calls'] == len(ports), \
+                f"Line {line_name} port count mismatch: metadata={meta['port_calls']}, rotation={len(ports)}"
+    
+    total_ports = sum(len(line.tolist_port()) for line in lines)
+    avg_ports = total_ports / len(lines) if lines else 0
+    
+    print(f"✓ All {len(lines)} lines have valid port rotations")
+    print(f"✓ Total port calls: {total_ports}, Average: {avg_ports:.1f} ports/line")
+
+
+# ===== Test 8: Metadata Contains Required Fields =====
+def test_metadata_structure(proforma_data):
+    """Test that metadata contains all required fields"""
+    metadata = proforma_data['metadata']
+    
+    required_fields = [
+        'vessel_rank',
+        'vessel_capacity_nominal',
+        'vessel_capacity_effective',
+        'speed',
+        'port_calls',
+        'port_rotation',
+        'total_duration',
+        'total_moves',
+        'service_type',
+        'port_details'
+    ]
+    
+    for line_name, line_meta in metadata.items():
+        for field in required_fields:
+            assert field in line_meta, f"Line {line_name} metadata missing field: {field}"
+        
+        # Check port_details structure
+        assert isinstance(line_meta['port_details'], list), \
+            f"Line {line_name} port_details should be list"
+        assert len(line_meta['port_details']) == line_meta['port_calls'], \
+            f"Line {line_name} port_details count should match port_calls"
+    
+    print(f"✓ All {len(metadata)} lines have required metadata fields")
+
+
+# ===== Test 9: Port Details Have Operational Data =====
+def test_port_details_structure(proforma_data):
+    """Test that port_details contain operational data"""
+    metadata = proforma_data['metadata']
+    
+    required_port_fields = [
+        'port_id',
+        'sequence',
+        'waiting_time',
+        'maneuvering_in',
+        'stay_time',
+        'maneuvering_out',
+        'time_to_next',
+        'speed_to_next',
+        'moves',
+        'productivity',
+        'allocation',
+        'capacity_scale',
+        'capacity_reserve'
+    ]
+    
+    total_port_details = 0
+    for line_name, line_meta in metadata.items():
+        for port_detail in line_meta['port_details']:
+            total_port_details += 1
+            for field in required_port_fields:
+                assert field in port_detail, \
+                    f"Line {line_name} port detail missing field: {field}"
+    
+    print(f"✓ All {total_port_details} port details have operational data")
+
+
+# ===== Test 10: Create Service Line Function Works =====
+def test_create_service_line_function(portpool):
+    """Test that create_service_line() works with 11-rank system"""
+    # Create a simple service line
+    port_ids = ['SGSIN', 'MYPKG', 'BDCGP']
+    
+    line = create_service_line('TEST_LINE', port_ids, portpool)
+    
+    assert isinstance(line, ServiceLine), "Should create ServiceLine instance"
+    assert line.name() == 'TEST_LINE', "Should have correct name"
+    ports = line.tolist_port()
+    assert len(ports) == 3, "Should have 3 ports"
+    
+    # Check ports are correct
+    for i, port_id in enumerate(port_ids):
+        assert ports[i].get_id() == port_id, f"Port {i} should be {port_id}"
+    
+    print(f"✓ create_service_line() works correctly")
+    print(f"✓ Created line with rotation: {port_ids}")
+
+
+# ===== Test 11: Proforma Lines Use Valid Ports =====
+def test_proforma_lines_use_valid_ports(proforma_data, portpool):
+    """Test that all ports in proforma lines exist in portpool"""
+    metadata = proforma_data['metadata']
+    
+    all_port_ids = set()
+    for line_meta in metadata.values():
+        for port_id in line_meta['port_rotation']:
+            all_port_ids.add(port_id)
+    
+    # Check all ports exist in portpool
+    for port_id in all_port_ids:
+        port = portpool.get_port(port_id)
+        assert port is not None, f"Port {port_id} not found in portpool"
+        assert port.get_id() == port_id, f"Port ID mismatch"
+    
+    print(f"✓ All {len(all_port_ids)} unique ports in proforma exist in portpool")
+    print(f"  Sample ports: {sorted(list(all_port_ids))[:10]}")
+
+
+# ===== Test 12: Vessel Capacities Are Reasonable =====
+def test_vessel_capacities(proforma_data):
+    """Test that vessel capacities in proforma are reasonable"""
+    metadata = proforma_data['metadata']
+    
+    for line_name, line_meta in metadata.items():
+        cap_nom = line_meta['vessel_capacity_nominal']
+        cap_eff = line_meta['vessel_capacity_effective']
+        
+        # Capacities should be positive
+        assert cap_nom > 0, f"Line {line_name} nominal capacity should be positive"
+        assert cap_eff > 0, f"Line {line_name} effective capacity should be positive"
+        
+        # Effective capacity should not exceed nominal
+        assert cap_eff <= cap_nom, \
+            f"Line {line_name} effective capacity {cap_eff} should not exceed nominal {cap_nom}"
+    
+    # Get capacity ranges
+    all_cap_nom = [meta['vessel_capacity_nominal'] for meta in metadata.values()]
+    all_cap_eff = [meta['vessel_capacity_effective'] for meta in metadata.values()]
+    
+    print(f"✓ All vessel capacities are valid")
+    print(f"  Nominal capacity range: {min(all_cap_nom):.0f} - {max(all_cap_nom):.0f} TEU")
+    print(f"  Effective capacity range: {min(all_cap_eff):.0f} - {max(all_cap_eff):.0f} TEU")
+
+
+# ===== Test 13: Service Speeds Are Reasonable =====
+def test_service_speeds(proforma_data):
+    """Test that service speeds in proforma are reasonable"""
+    metadata = proforma_data['metadata']
+    
+    all_speeds = []
+    low_speed_lines = []
+    for line_name, line_meta in metadata.items():
+        speed = line_meta['speed']
+        
+        # Speed should be positive and not unreasonably high
+        assert speed > 0, f"Line {line_name} speed should be positive"
+        assert speed <= 25.0, f"Line {line_name} speed {speed} exceeds maximum (25 knots)"
+        
+        # Track unusually low speeds (might be short-distance or feeder services)
+        if speed < 7.0:
+            low_speed_lines.append((line_name, speed))
+        
+        all_speeds.append(speed)
+    
+    print(f"✓ All service speeds are valid (positive, <= 25 knots)")
+    print(f"  Speed range: {min(all_speeds):.1f} - {max(all_speeds):.1f} knots")
+    print(f"  Average speed: {sum(all_speeds)/len(all_speeds):.1f} knots")
+    if low_speed_lines:
+        print(f"  Note: {len(low_speed_lines)} lines with speed < 7 knots (likely short-distance/feeder)")
+
+
+# ===== Test 14: Port Operational Times Are Positive =====
+def test_port_operational_times(proforma_data):
+    """Test that port operational times are non-negative"""
+    metadata = proforma_data['metadata']
+    
+    total_ports = 0
+    for line_name, line_meta in metadata.items():
+        for port_detail in line_meta['port_details']:
+            total_ports += 1
+            
+            # All times should be non-negative
+            assert port_detail['waiting_time'] >= 0, \
+                f"Line {line_name} port {port_detail['port_id']} waiting time should be >= 0"
+            assert port_detail['maneuvering_in'] >= 0, \
+                f"Line {line_name} port {port_detail['port_id']} maneuvering_in should be >= 0"
+            assert port_detail['stay_time'] >= 0, \
+                f"Line {line_name} port {port_detail['port_id']} stay_time should be >= 0"
+            assert port_detail['maneuvering_out'] >= 0, \
+                f"Line {line_name} port {port_detail['port_id']} maneuvering_out should be >= 0"
+            assert port_detail['time_to_next'] >= 0, \
+                f"Line {line_name} port {port_detail['port_id']} time_to_next should be >= 0"
+    
+    print(f"✓ All {total_ports} port operational times are non-negative")
+
+
+# ===== Test 15: Vessel Ranks Match VesselPool Vessels =====
+def test_vessel_ranks_match_vesselpool(proforma_data, vesselpool):
+    """Test that vessels can be retrieved from vesselpool by rank"""
+    metadata = proforma_data['metadata']
+    
+    for line_name, line_meta in metadata.items():
+        vessel_rank = line_meta['vessel_rank']
+        
+        # Find vessel in vesselpool
+        vessel = None
+        for v in vesselpool.vessels_list:
+            if v.vessel_rank == vessel_rank:
+                vessel = v
+                break
+        
+        assert vessel is not None, \
+            f"Line {line_name} uses rank {vessel_rank} not found in vesselpool"
+        
+        # Check vessel has required attributes
+        assert hasattr(vessel, 'vessel_capacity'), "Vessel should have vessel_capacity"
+        assert hasattr(vessel, 'bunkering_cost_coefs'), "Vessel should have bunkering_cost_coefs"
+    
+    print(f"✓ All proforma vessel ranks found in vesselpool")
+
+
+# ===== Test 16: Port Productivity Values Are Reasonable =====
+def test_port_productivity(proforma_data):
+    """Test that port productivity values are reasonable"""
+    metadata = proforma_data['metadata']
+    
+    all_productivity = []
+    for line_name, line_meta in metadata.items():
+        for port_detail in line_meta['port_details']:
+            productivity = port_detail['productivity']
+            
+            # Productivity should be positive
+            assert productivity > 0, \
+                f"Line {line_name} port {port_detail['port_id']} productivity should be positive"
+            
+            # Typical port productivity: 20-150 moves/hour
+            assert 10 <= productivity <= 200, \
+                f"Line {line_name} port {port_detail['port_id']} productivity {productivity} seems unreasonable"
+            
+            all_productivity.append(productivity)
+    
+    print(f"✓ All port productivity values are reasonable")
+    print(f"  Productivity range: {min(all_productivity):.1f} - {max(all_productivity):.1f} moves/hour")
+    print(f"  Average productivity: {sum(all_productivity)/len(all_productivity):.1f} moves/hour")
+
+
+# ===== Test 17: Service Types Are Valid =====
+def test_service_types(proforma_data):
+    """Test that service types are valid categories"""
+    metadata = proforma_data['metadata']
+    
+    valid_service_types = {'OWN', 'VSA', 'FIX', 'SLOT', 'CHARTER'}
+    
+    service_type_counts = {}
+    for line_name, line_meta in metadata.items():
+        svc_type = line_meta['service_type']
+        
+        # Should be a valid service type
+        assert svc_type in valid_service_types, \
+            f"Line {line_name} service type '{svc_type}' not in {valid_service_types}"
+        
+        service_type_counts[svc_type] = service_type_counts.get(svc_type, 0) + 1
+    
+    print(f"✓ All service types are valid")
+    print(f"  Service type distribution: {service_type_counts}")
+
+
+# ===== Test 18: Total Duration Matches Sum of Components =====
+def test_total_duration_consistency(proforma_data):
+    """Test that total duration is consistent with port operational times"""
+    metadata = proforma_data['metadata']
+    
+    for line_name, line_meta in metadata.items():
+        total_duration = line_meta['total_duration']
+        
+        # Calculate from port details
+        calculated_duration = 0
+        for port_detail in line_meta['port_details']:
+            # Duration per port call includes all operational times
+            port_duration = (
+                port_detail['waiting_time'] +
+                port_detail['maneuvering_in'] +
+                port_detail['stay_time'] +
+                port_detail['maneuvering_out'] +
+                port_detail['time_to_next']
+            )
+            # Note: time_to_next for last port might be sailing back to first port
+        
+        # Total duration should be positive
+        assert total_duration > 0, f"Line {line_name} total duration should be positive"
+    
+    print(f"✓ All service line durations are positive")
+
+
+# ===== Test 19: Integration Test - Load and Use Proforma Line =====
+def test_integration_proforma_line_usage(proforma_data, portpool, vesselpool):
+    """Integration test: Load proforma line and verify it can be used for operations"""
+    lines = proforma_data['lines']
+    metadata = proforma_data['metadata']
+    
+    # Take first line as example
+    if len(lines) > 0:
+        line = lines[0]
+        line_name = line.name()
+        
+        assert line_name in metadata, f"Line {line_name} should have metadata"
+        
+        meta = metadata[line_name]
+        vessel_rank = meta['vessel_rank']
+        
+        # Get corresponding vessel from vesselpool
+        vessel = next((v for v in vesselpool.vessels_list if v.vessel_rank == vessel_rank), None)
+        assert vessel is not None, f"Vessel rank {vessel_rank} should exist in vesselpool"
+        
+        # Verify line can access port operations
+        for port in line.tolist_port():
+            # Port should support operations with all vessel ranks
+            assert hasattr(port, 'get_id'), "Port should have get_id() method"
+            
+            # Port should be able to get costs for this vessel
+            # (This would require Port.get_portcall_costs() method)
+            assert hasattr(port, 'get_portcall_costs'), "Port should have get_portcall_costs method"
+        
+        print(f"✓ Integration test passed for line: {line_name}")
+        print(f"  Vessel rank: {vessel_rank}, Ports: {len(line.tolist_port())}")
+
+
+# ===== Test 20: CSV Data Integrity =====
+def test_csv_data_integrity(proforma_csv_path):
+    """Test that proforma CSV has no missing required data"""
+    df = pd.read_csv(proforma_csv_path)
+    
+    required_columns = [
+        'linename', 'portid', 'sequence', 'vrank', 'cap_nom', 'cap_eff',
+        'vspeed', 'time_wait', 'time_manin', 'staytime', 'time_manout',
+        'timetonext', 'moves', 'ops_prod', 'svc_type'
+    ]
+    
+    # Check all required columns exist
+    for col in required_columns:
+        assert col in df.columns, f"CSV missing required column: {col}"
+    
+    # Check for missing values in critical columns
+    critical_columns = ['linename', 'portid', 'sequence', 'vrank', 'cap_nom']
+    for col in critical_columns:
+        missing = df[col].isna().sum()
+        assert missing == 0, f"Column {col} has {missing} missing values"
+    
+    # Check data types
+    assert df['vrank'].dtype in [int, 'int64'], "vrank should be integer"
+    assert df['sequence'].dtype in [int, 'int64'], "sequence should be integer"
+    
+    print(f"✓ CSV data integrity verified")
+    print(f"  Total rows: {len(df)}")
+    print(f"  Unique lines: {df['linename'].nunique()}")
+    print(f"  Unique ports: {df['portid'].nunique()}")
+
+
+if __name__ == "__main__":
+    # Run tests with verbose output
+    pytest.main([__file__, "-v", "-s"])

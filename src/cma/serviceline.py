@@ -289,19 +289,30 @@ class ServiceLine:
 				if warn:
 					print("Warning: Invalid since a port is visited consecutively.")
 				return False
-			# Case 3: repeated line
-			# For example, line contains (..., P1, P2, P1, P2, ...)
-			if len(self.__line) > 3 \
-					and self.__line[loc] == self.__line[loc_next_2] \
-					and self.__line[loc_next_1] == self.__line[loc_next_3]:
+		
+		# Case 3: repeated directed edges (sub-routes)
+		# Check that no directed edge (A→B) appears more than once in the rotation
+		# This prevents patterns like CNXMN→TWKHH→TWTXG→CNXMN→TWKHH
+		edges_seen = set()
+		for loc in range(self.number_of_port()):
+			loc_next = self.idx_of_next_idx(loc)
+			edge = (self.__line[loc], self.__line[loc_next])
+			if edge in edges_seen:
 				if warn:
-					print("Warning: Invalid since a slot is repeated.")
+					print(f"Warning: Invalid since edge {self.__line[loc].get_id()}→{self.__line[loc_next].get_id()} is repeated.")
 				return False
+			edges_seen.add(edge)
 		## Case 4: a port visited more than 3 times
 		port_ctr = Counter(self.__line)
 		if any(ct > port.get_max_number_of_visit() for port, ct in port_ctr.items()):
 			if warn:
 				print("Warning: Invalid since a port is visited more than max allowed number.")
+			return False
+		## Case 5: too many unique ports (> 20)
+		unique_ports = len(set(self.__line))
+		if unique_ports > 20:
+			if warn:
+				print(f"Warning: Invalid since service has {unique_ports} unique ports (max 20 allowed).")
 			return False
 		return True
 
@@ -402,6 +413,262 @@ class ServiceLine:
 		"""Similar to above
 		"""
 		return self.__line[self.idx_of_prev_idx(idx)]
+
+	###########################################################################
+	# Atomic Operations for Modifying Service Lines
+	###########################################################################
+
+	def shift_port(self, port_idx: int, delta: int, validate: bool = True) -> 'ServiceLine':
+		"""Shift a port visit earlier or later in the rotation
+		
+		Args:
+			port_idx: Index of the port to shift (0-based)
+			delta: Number of positions to shift (positive = later, negative = earlier)
+			validate: Whether to validate the result (default True)
+		
+		Returns:
+			New ServiceLine with the port shifted
+			
+		Raises:
+			ValueError: If port_idx is invalid or result is invalid service line
+			
+		Example:
+			Line: [P0, P1, P2, P3, P4]
+			shift_port(1, 2) → [P0, P2, P3, P1, P4]  # P1 shifted 2 positions later
+			shift_port(3, -1) → [P0, P1, P3, P2, P4]  # P3 shifted 1 position earlier
+		"""
+		n = self.number_of_port()
+		
+		if not (0 <= port_idx < n):
+			raise ValueError(f"Invalid port_idx {port_idx}. Must be in range [0, {n-1}]")
+		
+		if delta == 0:
+			# No change, return copy
+			return ServiceLine(self.name(), self.__line.copy(), _test=not validate)
+		
+		# Create new sequence
+		sequence = self.__line.copy()
+		port = sequence.pop(port_idx)
+		
+		# Calculate new position (handle circular rotation)
+		new_idx = (port_idx + delta) % n
+		sequence.insert(new_idx, port)
+		
+		# Create and validate new service line
+		try:
+			new_line = ServiceLine(self.name(), sequence, _test=not validate)
+			if validate and not new_line.check_valid(warn=False):
+				raise ValueError(f"Shifting port at index {port_idx} by {delta} creates invalid service line")
+			return new_line
+		except ValueError as e:
+			raise ValueError(f"Shifting port at index {port_idx} by {delta} failed: {str(e)}")
+
+	def swap_ports(self, idx1: int, idx2: int, validate: bool = True) -> 'ServiceLine':
+		"""Swap two port visits in the rotation
+		
+		Args:
+			idx1: Index of first port (0-based)
+			idx2: Index of second port (0-based)
+			validate: Whether to validate the result (default True)
+		
+		Returns:
+			New ServiceLine with ports swapped
+			
+		Raises:
+			ValueError: If indices are invalid or result is invalid service line
+			
+		Example:
+			Line: [P0, P1, P2, P3, P4]
+			swap_ports(1, 3) → [P0, P3, P2, P1, P4]  # P1 and P3 swapped
+		"""
+		n = self.number_of_port()
+		
+		if not (0 <= idx1 < n):
+			raise ValueError(f"Invalid idx1 {idx1}. Must be in range [0, {n-1}]")
+		if not (0 <= idx2 < n):
+			raise ValueError(f"Invalid idx2 {idx2}. Must be in range [0, {n-1}]")
+		
+		if idx1 == idx2:
+			# No change, return copy
+			return ServiceLine(self.name(), self.__line.copy(), _test=not validate)
+		
+		# Create new sequence with swapped ports
+		sequence = self.__line.copy()
+		sequence[idx1], sequence[idx2] = sequence[idx2], sequence[idx1]
+		
+		# Create and validate new service line
+		try:
+			new_line = ServiceLine(self.name(), sequence, _test=not validate)
+			if validate and not new_line.check_valid(warn=False):
+				raise ValueError(f"Swapping ports at indices {idx1} and {idx2} creates invalid service line")
+			return new_line
+		except ValueError as e:
+			raise ValueError(f"Swapping ports at indices {idx1} and {idx2} failed: {str(e)}")
+
+	###########################################################################
+	# Multi-Step Action Macros (Composite Operations)
+	###########################################################################
+
+	def reverse_segment(self, start_idx: int, end_idx: int, validate: bool = True) -> 'ServiceLine':
+		"""Reverse the order of ports in a segment of the rotation
+		
+		Args:
+			start_idx: Start of segment to reverse (inclusive, 0-based)
+			end_idx: End of segment to reverse (inclusive, 0-based)
+			validate: Whether to validate the result (default True)
+		
+		Returns:
+			New ServiceLine with segment reversed
+			
+		Example:
+			Line: [P0, P1, P2, P3, P4]
+			reverse_segment(1, 3) → [P0, P3, P2, P1, P4]
+		"""
+		n = self.number_of_port()
+		
+		if not (0 <= start_idx < n):
+			raise ValueError(f"Invalid start_idx {start_idx}")
+		if not (0 <= end_idx < n):
+			raise ValueError(f"Invalid end_idx {end_idx}")
+		
+		sequence = self.__line.copy()
+		
+		# Handle wrapping for circular rotation
+		if start_idx <= end_idx:
+			# Simple case: reverse continuous segment
+			segment = sequence[start_idx:end_idx+1]
+			segment.reverse()
+			sequence[start_idx:end_idx+1] = segment
+		else:
+			# Wrapping case: segment wraps around end
+			segment = sequence[start_idx:] + sequence[:end_idx+1]
+			segment.reverse()
+			sequence[start_idx:] = segment[:len(sequence[start_idx:])]
+			sequence[:end_idx+1] = segment[len(sequence[start_idx:]):]
+		
+		try:
+			new_line = ServiceLine(self.name(), sequence, _test=not validate)
+			if validate and not new_line.check_valid(warn=False):
+				raise ValueError(f"Reversing segment [{start_idx}, {end_idx}] creates invalid service line")
+			return new_line
+		except ValueError as e:
+			raise ValueError(f"Reversing segment [{start_idx}, {end_idx}] failed: {str(e)}")
+
+	def rotate(self, steps: int, validate: bool = True) -> 'ServiceLine':
+		"""Rotate the entire service line by a number of steps
+		
+		Args:
+			steps: Number of positions to rotate (positive = right, negative = left)
+			validate: Whether to validate the result (default True)
+		
+		Returns:
+			New ServiceLine rotated by steps positions
+			
+		Example:
+			Line: [P0, P1, P2, P3, P4]
+			rotate(2) → [P3, P4, P0, P1, P2]  # Rotate right by 2
+			rotate(-1) → [P1, P2, P3, P4, P0]  # Rotate left by 1
+		"""
+		n = self.number_of_port()
+		
+		if n == 0:
+			return ServiceLine(self.name(), self.__line.copy(), _test=not validate)
+		
+		# Normalize steps to be within [0, n)
+		steps = steps % n
+		
+		# Rotate by slicing
+		sequence = self.__line[-steps:] + self.__line[:-steps] if steps > 0 else self.__line.copy()
+		
+		try:
+			new_line = ServiceLine(self.name(), sequence, _test=not validate)
+			if validate and not new_line.check_valid(warn=False):
+				raise ValueError(f"Rotating by {steps} steps creates invalid service line")
+			return new_line
+		except ValueError as e:
+			raise ValueError(f"Rotating by {steps} steps failed: {str(e)}")
+
+	def insert_port(self, port: Port, position: int, validate: bool = True) -> 'ServiceLine':
+		"""Insert a port at a specific position in the rotation
+		
+		Args:
+			port: Port object to insert
+			position: Index where to insert (0-based, port will be at this index after insertion)
+			validate: Whether to validate the result (default True)
+		
+		Returns:
+			New ServiceLine with port inserted
+			
+		Example:
+			Line: [P0, P1, P2, P3]
+			insert_port(P_new, 2) → [P0, P1, P_new, P2, P3]
+		"""
+		n = self.number_of_port()
+		
+		if not (0 <= position <= n):
+			raise ValueError(f"Invalid position {position}. Must be in range [0, {n}]")
+		
+		sequence = self.__line.copy()
+		sequence.insert(position, port)
+		
+		try:
+			new_line = ServiceLine(self.name(), sequence, _test=not validate)
+			if validate and not new_line.check_valid(warn=False):
+				raise ValueError(f"Inserting port {port.get_id()} at position {position} creates invalid service line")
+			return new_line
+		except ValueError as e:
+			raise ValueError(f"Inserting port {port.get_id()} at position {position} failed: {str(e)}")
+
+	def remove_port(self, position: int, validate: bool = True) -> 'ServiceLine':
+		"""Remove a port at a specific position from the rotation
+		
+		Args:
+			position: Index of port to remove (0-based)
+			validate: Whether to validate the result (default True)
+		
+		Returns:
+			New ServiceLine with port removed
+			
+		Example:
+			Line: [P0, P1, P2, P3, P4]
+			remove_port(2) → [P0, P1, P3, P4]
+		"""
+		n = self.number_of_port()
+		
+		if not (0 <= position < n):
+			raise ValueError(f"Invalid position {position}. Must be in range [0, {n-1}]")
+		
+		sequence = self.__line.copy()
+		removed_port = sequence.pop(position)
+		
+		try:
+			new_line = ServiceLine(self.name(), sequence, _test=not validate)
+			if validate and not new_line.check_valid(warn=False):
+				raise ValueError(f"Removing port {removed_port.get_id()} at position {position} creates invalid service line")
+			return new_line
+		except ValueError as e:
+			raise ValueError(f"Removing port at position {position} failed: {str(e)}")
+
+	def move_port(self, from_idx: int, to_idx: int, validate: bool = True) -> 'ServiceLine':
+		"""Move a port from one position to another (combination of remove + insert)
+		
+		This is equivalent to shift_port but with explicit source and destination indices.
+		
+		Args:
+			from_idx: Current index of port (0-based)
+			to_idx: Destination index (0-based)
+			validate: Whether to validate the result (default True)
+		
+		Returns:
+			New ServiceLine with port moved
+			
+		Example:
+			Line: [P0, P1, P2, P3, P4]
+			move_port(1, 3) → [P0, P2, P3, P1, P4]
+		"""
+		# Use shift_port since it's already implemented
+		delta = to_idx - from_idx
+		return self.shift_port(from_idx, delta, validate=validate)
 
 	def plot(self, selected_countries: list[str], fig_size = (15, 9), eps = 2, center_pacific=False):
 		"""Plot the service line

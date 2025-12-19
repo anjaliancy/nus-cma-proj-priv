@@ -311,6 +311,7 @@ class PortGraph(PortPool):
 	additional information, including
 		- mutually weekly demand rate
 		- mutually distance
+		- expected transit time (days)
 	This class is only used in layer 0, the approximation of cost function.
 	"""
 	__mat_distance: np.ndarray
@@ -318,6 +319,7 @@ class PortGraph(PortPool):
 	__mat_unit_revenue: np.ndarray | None    # price of unit demand
 	__mat_IsPanama: np.ndarray | None        # not important
 	__mat_IsSuez: np.ndarray | None          # not important
+	__mat_transit_time: np.ndarray | None    # expected transit time in days
 
 	def __init__(self, ports_pool: PortPool,
 			mat_distance: list[list[float]] | np.ndarray,
@@ -325,6 +327,7 @@ class PortGraph(PortPool):
 			mat_unit_revenue: list[list[float]] | np.ndarray | None = None,
 			mat_IsPanama: list[list[float]] | np.ndarray | None = None,
 			mat_IsSuez: list[list[float]] | np.ndarray | None = None,
+			mat_transit_time: list[list[float]] | np.ndarray | None = None,
 			filter_by_demand=True):
 		"""
 		Input:
@@ -346,6 +349,10 @@ class PortGraph(PortPool):
 			self.__mat_IsSuez = np.array(mat_IsSuez)[:ports_number, :ports_number]
 		else:
 			self.__mat_IsSuez = None
+		if mat_transit_time is not None:
+			self.__mat_transit_time = np.array(mat_transit_time)[:ports_number, :ports_number]
+		else:
+			self.__mat_transit_time = None
 
 		if filter_by_demand:
 			od_pairs = self.get_all_od_pairs()
@@ -363,6 +370,8 @@ class PortGraph(PortPool):
 				self.__mat_unit_revenue = self.get_filtered_isPanama_matrix(sub_ports)
 			if self.__mat_IsSuez is not None:
 				self.__mat_unit_revenue = self.get_filtered_isSuez_matrix(sub_ports)
+			if self.__mat_transit_time is not None:
+				self.__mat_transit_time = self.get_filtered_transit_time_matrix(sub_ports)
 			super().update(sub_ports)
 			self.__mat_demand = sub_demands
 			self.__mat_distance = sub_distance
@@ -432,6 +441,13 @@ class PortGraph(PortPool):
 	def get_demand_by_idx(self, port_i_idx: int, port_j_idx: int) -> float:
 		return self.__mat_demand[port_i_idx, port_j_idx]
 
+	def get_transit_time_by_idx(self, port_i_idx: int, port_j_idx: int) -> float | None:
+		"""Get expected transit time in days for OD pair by index"""
+		if self.__mat_transit_time is None:
+			return None
+		else:
+			return self.__mat_transit_time[port_i_idx, port_j_idx]
+
 	def get_filtered_demand_matrix(self, ports: list[Port]) -> np.ndarray:
 		"""filter the default demand matrix with another portpool
 		"""
@@ -457,6 +473,13 @@ class PortGraph(PortPool):
 			ValueError("`Portgraph.get_filtered_isPanama_matrix`: self.__mat_IsPanama is None")
 		indeces = [self.get_unique_index(p) for p in ports]
 		return self.__mat_IsPanama[indeces, :][:, indeces]  # type: ignore
+
+	def get_filtered_transit_time_matrix(self, ports: list[Port]) -> np.ndarray:
+		"""filter the default transit time matrix with another portpool"""
+		if self.__mat_transit_time is None:
+			raise ValueError("`Portgraph.get_filtered_transit_time_matrix`: self.__mat_transit_time is None")
+		indeces = [self.get_unique_index(p) for p in ports]
+		return self.__mat_transit_time[indeces, :][:, indeces]  # type: ignore
 
 	def get_filtered_isSuez_matrix(self, ports: list[Port]) -> np.ndarray:
 		if self.__mat_IsSuez is None:

@@ -19,6 +19,7 @@ from .data_reader import \
 		read_sailing_distance_data, \
 		read_current_line_data, \
 		read_demand_data, \
+		read_cnc_proforma_data, \
 		randomly_create_lines
 from .utils import \
 		display_two_figs, \

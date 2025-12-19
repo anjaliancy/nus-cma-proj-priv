@@ -450,8 +450,13 @@ class ServiceGraph:
 			tuneparams: dict[str, float] = {
 				'turnon-transship_shipclass_restriction': 0, # making the algorithm slow
 				'turnon-vessel_speed_optimization': 0,       # making the algorithm super slow
+				'turnon-port_operations_constraint': 1,      # enforce port stay >= operations/productivity
+				'turnon-transit_time_penalty': 1,            # penalize paths exceeding expected transit time
 				'ctrparam-kts_buffer': 0,
 				'ctrparam-transship_A': 100,
+				'ctrparam-speed_soft_cap_kts': 16.5,         # soft cap for speed (penalty above this)
+				'ctrparam-speed_penalty_multiplier': 2.0,    # multiply fuel cost by this factor above soft cap
+				'ctrparam-transit_penalty_multiplier': 1000.0,  # USD per TEU-day of excess transit time
 				'BigM-transship': 10000,
 				'BigM-n_ships' : 2,           # at most 2 ships of the same type
 				'BigM-saildays': 64,          # at most 9 weeks, hence less than 64 days
@@ -730,14 +735,44 @@ class ServiceGraph:
 		ports_gross_prod = [sum(prods) for prods in ports_prods]
 		# 3) suitable type of vessel for each port
 		ports_suitable_v = [np.argmax(prods) for prods in ports_prods]
-		# 4) Port staying days per week for each line (row) and each port (rolumn)
-		matrix_stay_days = np.array([[0 for _ in portgraph.tolist_port()]for _ in self.__lines_list], dtype=object)
+		# 4) Port staying days per week for each line (row) and each port (column)
+		
+		if tuneparams.get('turnon-port_operations_constraint', 1) > 0.5:
+			# Port stay days as decision variable with lower bound constraint
+			matrix_stay_days = cp.Variable(shape=(n_lines, portgraph.get_number_of_ports()), nonneg=True)
+			
+			# Constraint: Stay_days >= Operations / Productivity
+			# Operations are in TEU, productivity in TEU/hour, so divide by 24 for days
+			for idx_line in range(n_lines):
+				for idx_port in range(portgraph.get_number_of_ports()):
+					gross_prod = ports_gross_prod[idx_port]
+					if gross_prod > 0:
+						# Stay_days >= Transshipment_volume / (Productivity * 24)
+						constraints.append(
+							matrix_stay_days[idx_line, idx_port] >= 
+							transshipments[idx_line, idx_port] / gross_prod / 24
+						)
+					else:
+						# No productivity means no operations allowed
+						constraints.append(matrix_stay_days[idx_line, idx_port] == 0)
+			
+			for idx_line in range(n_lines):
+				obj_expr += cp.sum(matrix_stay_days[idx_line, :] * ports_costs_transsip)
+		else:
+			# Legacy mode: direct calculation (circular definition)
+			matrix_stay_days = np.array([[0 for _ in portgraph.tolist_port()]for _ in self.__lines_list], dtype=object)
+			for idx_line in range(n_lines):
+				stay_days_per_port = []
+				for idx_port, gross_prod in enumerate(ports_gross_prod):
+					if gross_prod > 0:
+						stay_days_per_port.append(transshipments[idx_line, idx_port] / gross_prod / 24)
+					else:
+						stay_days_per_port.append(0)
+				matrix_stay_days[idx_line, :] = stay_days_per_port
+				obj_expr += matrix_stay_days[idx_line, :] @ ports_costs_transsip
 
+		# Big M's method for transshipment ship class restriction
 		for idx_line in range(n_lines):
-			matrix_stay_days[idx_line, :] = transshipments[idx_line, :] / ports_gross_prod / 24
-			obj_expr += matrix_stay_days[idx_line, :] @ ports_costs_transsip
-
-			# Big M's method
 			for idx_port in range(portgraph.get_number_of_ports()):
 				if tuneparams['turnon-transship_shipclass_restriction'] > 0.5:
 					transamount = transshipments[idx_line, idx_port]
@@ -750,12 +785,25 @@ class ServiceGraph:
 		daily_bukering_cost_rates, speed_level0 = vesselpool.get_bukering_costs()  # shape = (rank, speed)
 		n_speed_level = daily_bukering_cost_rates.shape[1]
 		KTS_levels = np.arange(speed_level0, speed_level0 + n_speed_level)
+		
+		# Apply speed soft cap penalty for speeds > 16.5 kts
+		speed_soft_cap = tuneparams.get('ctrparam-speed_soft_cap_kts', 16.5)
+		penalty_mult = tuneparams.get('ctrparam-speed_penalty_multiplier', 2.0)
+		cap_index = int(np.ceil(speed_soft_cap - speed_level0))  # First speed level > soft cap
+		if cap_index < n_speed_level:
+			daily_bukering_cost_rates = daily_bukering_cost_rates.copy()
+			daily_bukering_cost_rates[:, cap_index:] *= penalty_mult
+		
 		list_saildays = []
 
 		for idx_line, line in enumerate(self.__lines_list):
 			line_ship_vars = ship_vars[idx_line, :]   # shape = (rank,)
 			line_distance = line.get_distance(portgraph)
-			line_port_stay_days = np.sum(matrix_stay_days[idx_line, :])
+			# Handle both decision variable and array cases
+			if tuneparams.get('turnon-port_operations_constraint', 1) > 0.5:
+				line_port_stay_days = cp.sum(matrix_stay_days[idx_line, :])
+			else:
+				line_port_stay_days = np.sum(matrix_stay_days[idx_line, :])
 			line_sailing_days = 7 * (week_vars[idx_line, :] @ week_levels) - line_port_stay_days
 			list_saildays.append(line_sailing_days)
 			buf = tuneparams['ctrparam-kts_buffer']
@@ -817,10 +865,52 @@ class ServiceGraph:
 			constraints.append(aux_portcall_weeks >= -bigM_portcall * line_weeks)
 			constraints.append(aux_portcall_weeks <= line_portcall_cost + bigM_portcall * (1 - line_weeks))
 			constraints.append(aux_portcall_weeks >= line_portcall_cost - bigM_portcall * (1 - line_weeks))
+		
+		# 5. Transit Time Penalty
+		# Penalize paths that exceed expected transit time (cargo value depreciation)
+		if tuneparams.get('turnon-transit_time_penalty', 1) > 0.5:
+			transit_penalty_mult = tuneparams.get('ctrparam-transit_penalty_multiplier', 1000.0)  # USD per TEU-day of tardiness
+			
+			for demand_vars_od, od, od_paths in zip(demand_vars, od_pairs, od_pair_paths):
+				expected_transit = portgraph.get_transit_time_by_idx(od[0], od[1])
+				
+				# Only apply penalty if transit time expectation exists
+				if expected_transit is not None and expected_transit > 0:
+					for idx_path, path in enumerate(od_paths):
+						x_od_p = demand_vars_od[idx_path]
+						
+						# Estimate path transit time
+						# 1. Sailing time based on distance and line speeds
+						path_sailing_time = 0.0
+						for slot in path.tolist_slot():
+							line = slot.get_service()
+							idx_line = self.__lines_list.index(line)
+							slot_distance = slot.get_distance(portgraph)
+							
+							# Approximate speed: distance / sailing_days
+							# Use average speed of 14 kts as conservative estimate for penalty calculation
+							# (Actual speed will be determined by optimization)
+							approx_speed_kts = 14.0
+							slot_sailing_days = slot_distance / (24.0 * approx_speed_kts)
+							path_sailing_time += slot_sailing_days
+						
+						# 2. Transshipment time at hubs
+						hubs = path.get_hubs()
+						transship_time = 0.0
+						for hub in hubs:
+							hub_idx = portgraph.get_unique_index(hub)
+							# Estimate transshipment time: assume 1 day per hub (conservative)
+							transship_time += 1.0
+						
+						# Total estimated transit time
+						estimated_transit = path_sailing_time + transship_time
+						
+						# Penalty for tardiness: max(0, actual - expected) * flow * penalty_rate
+						if estimated_transit > expected_transit:
+							tardiness = estimated_transit - expected_transit
+							obj_expr += transit_penalty_mult * tardiness * x_od_p
 		#
-		# endregion
-
-		# region Key Constraints
+		# endregion		# region Key Constraints
 		# Constraint: (Weekly Demand Flow) sum X_{odp} >= (Weekly Demand) D_{od}
 		for pair_od, demand_vars_od in zip(od_pairs, demand_vars):
 			demand_od = portgraph.get_demand_by_idx(pair_od[0], pair_od[1])
@@ -864,7 +954,7 @@ class ServiceGraph:
 
 		return {
 			'total cost': typing.cast(float, prob.value),
-			'demand rounts': demand_vars,
+			'demand routes': demand_vars,
 			'line flows': flow_vars,
 			'weeks': week_vars,
 			'ships': ship_vars,
@@ -1064,7 +1154,7 @@ class ServiceGraph:
 			'total cost': typing.cast(float, prob.value),
 			'line flows': flow_vars,
 			'weeks': week_vars,
-			'demand rounts': demand_vars,
+			'demand routes': demand_vars,
 			'ships': ship_vars,
 			'port staying days': matrix_stay_days,
 			'line sailing days': list_saildays,
