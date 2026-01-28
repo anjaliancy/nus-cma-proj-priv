@@ -197,7 +197,7 @@ class ServiceGraph:
 		"""
 		old_line = self.__lines_list[graph_action.idx_line]
 		line_action = graph_action.get_line_action(old_line, portgraph)
-		new_line = old_line.apply_action(line_action, portgraph)
+		new_line = old_line.apply_action(line_action, portgraph, portgraph=portgraph)
 
 		new_services: list[ServiceLine] = self.__lines_list.copy()
 		new_services[graph_action.idx_line] = new_line
@@ -312,6 +312,59 @@ class ServiceGraph:
 								paths_list.append(Path(path1 + path2 + path3))
 		return paths_list
 
+	def get_paths_3(self, start: Port, end: Port, trans_ports) -> list[Path]:
+		"""Find out all paths the connects an OD pair
+
+		Note: this method finds all path with 3 transshipments
+		"""
+		paths_list: list[Path] = []
+		lines_has_o: list[ServiceLine] = self.get_all_lines_contains([start])
+		lines_has_d: list[ServiceLine] = self.get_all_lines_contains([end])
+
+		# Connectivity: line_o -> line_m1 -> line_m2 -> line_d
+		for line_m1 in self.__lines_list:
+			for line_o in lines_has_o:
+				if line_o == line_m1:
+					continue
+				hubs_o_m1 = list(set(line_o.tolist_port()) & set(line_m1.tolist_port()))
+				if not hubs_o_m1:
+					continue
+				
+				for line_m2 in self.__lines_list:
+					if line_m2 == line_m1 or line_m2 == line_o:
+						continue
+					hubs_m1_m2 = list(set(line_m1.tolist_port()) & set(line_m2.tolist_port()))
+					if not hubs_m1_m2:
+						continue
+						
+					for line_d in lines_has_d:
+						if line_d == line_m2 or line_d == line_m1 or line_d == line_o:
+							continue
+						hubs_m2_d = list(set(line_m2.tolist_port()) & set(line_d.tolist_port()))
+						if not hubs_m2_d:
+							continue
+
+						for hub1 in hubs_o_m1:
+							if hub1 not in trans_ports: continue
+							for hub2 in hubs_m1_m2:
+								if hub2 not in trans_ports: continue
+								for hub3 in hubs_m2_d:
+									if hub3 not in trans_ports: continue
+									
+									path1, path2, path3, path4 = [], [], [], []
+									if start != hub1:
+										path1 = line_o.get_shortest_path(start, hub1).tolist_slot()
+									if hub1 != hub2:
+										path2 = line_m1.get_shortest_path(hub1, hub2).tolist_slot()
+									if hub2 != hub3:
+										path3 = line_m2.get_shortest_path(hub2, hub3).tolist_slot()
+									if hub3 != end:
+										path4 = line_d.get_shortest_path(hub3, end).tolist_slot()
+										
+									if len(path1) + len(path2) + len(path3) + len(path4) > 0:
+										paths_list.append(Path(path1 + path2 + path3 + path4))
+		return paths_list
+
 	def get_all_paths(self, portgraph: PortGraph, trans_ports: None|list[Port]=None) -> dict[str, list]:
 		"""Searching all connected paths among all ports in the network
 
@@ -352,8 +405,14 @@ class ServiceGraph:
 					paths.insert(pair_loc, paths_od)
 					connected.insert(pair_loc, pair)
 				else:
-					unconnected.append(pair)
-					unconnected_demand.append(pair_demand)
+					# try 3 transshipments
+					paths_od: list[Path] = self.get_paths_3(port_o, port_d, trans_ports)
+					if len(paths_od) > 0:
+						paths.insert(pair_loc, paths_od)
+						connected.insert(pair_loc, pair)
+					else:
+						unconnected.append(pair)
+						unconnected_demand.append(pair_demand)
 
 		connected.reverse()
 		paths.reverse()
@@ -744,14 +803,22 @@ class ServiceGraph:
 			# Constraint: Stay_days >= Operations / Productivity
 			# Operations are in TEU, productivity in TEU/hour, so divide by 24 for days
 			for idx_line in range(n_lines):
+				line = self.__lines_list[idx_line]
 				for idx_port in range(portgraph.get_number_of_ports()):
+					port = portgraph.get_port_by_idx(idx_port)
 					gross_prod = ports_gross_prod[idx_port]
+					
 					if gross_prod > 0:
 						# Stay_days >= Transshipment_volume / (Productivity * 24)
 						constraints.append(
 							matrix_stay_days[idx_line, idx_port] >= 
 							transshipments[idx_line, idx_port] / gross_prod / 24
 						)
+						# NEW: Minimum berthing time constraint (3 hours)
+						# Only apply if port is in the service line
+						if line.has_port(port):
+							constraints.append(matrix_stay_days[idx_line, idx_port] >= 3.0 / 24.0)
+							
 					else:
 						# No productivity means no operations allowed
 						constraints.append(matrix_stay_days[idx_line, idx_port] == 0)
@@ -762,11 +829,18 @@ class ServiceGraph:
 			# Legacy mode: direct calculation (circular definition)
 			matrix_stay_days = np.array([[0 for _ in portgraph.tolist_port()]for _ in self.__lines_list], dtype=object)
 			for idx_line in range(n_lines):
+				line = self.__lines_list[idx_line]
 				stay_days_per_port = []
 				for idx_port, gross_prod in enumerate(ports_gross_prod):
+					port = portgraph.get_port_by_idx(idx_port)
 					if gross_prod > 0:
-						stay_days_per_port.append(transshipments[idx_line, idx_port] / gross_prod / 24)
+						val = transshipments[idx_line, idx_port] / gross_prod / 24
+						# NEW: Minimum berthing time constraint (3 hours)
+						if line.has_port(port):
+							val = max(val, 3.0 / 24.0)
+						stay_days_per_port.append(val)
 					else:
+						# Zero productivity: no port operations possible
 						stay_days_per_port.append(0)
 				matrix_stay_days[idx_line, :] = stay_days_per_port
 				obj_expr += matrix_stay_days[idx_line, :] @ ports_costs_transsip
@@ -814,6 +888,23 @@ class ServiceGraph:
 				constraints.append(line_sailing_days >= 0.5 * 7)
 				constraints.append(line_distance >= 24 * line_sailing_days * (KTS_levels[0] - buf))
 				constraints.append(line_distance <= 24 * line_sailing_days * (KTS_levels[-1] + buf))
+				
+				# Buffer Constraint (Mode 1 - Continuous)
+				# Buffer = (T_wait + Dist * (1/v - 1/16.5)) / (168 * n_vessels)
+				# Dist/v = Sailing Time = line_sailing_days * 24
+				# So Numerator = T_wait + 24 * line_sailing_days - Dist/16.5
+				
+				wait_times = line.get_buffer_wait_times()
+				ignore_lb = line.get_buffer_ignore_lb()
+				t_wait_total = sum(wait_times) if wait_times else 0.0
+				
+				numerator = t_wait_total + 24 * line_sailing_days - line_distance / 16.5
+				n_vessels_expr = week_vars[idx_line] @ week_levels
+				denominator_hours = 168 * n_vessels_expr
+				
+				constraints.append(numerator <= 0.30 * denominator_hours)
+				if not ignore_lb:
+					constraints.append(numerator >= 0.15 * denominator_hours)
 
 			else:  # if we want to further optimize the bukering cost by determine optimal speed
 				# Auxiliary Variable:
@@ -837,8 +928,8 @@ class ServiceGraph:
 
 				# Constraint: Optimal Speed * Sailing Days ~= Distance
 				aux_W_speedsaildays = cp.Variable(shape=n_speed_level)
-				constraints.append(24 * aux_W_speedsaildays @ (KTS_levels + 1) >= line_distance)
-				constraints.append(24 * aux_W_speedsaildays @ (KTS_levels - 1) <= line_distance)
+				constraints.append(24 * aux_W_speedsaildays @ (KTS_levels + 0.5) >= line_distance)
+				constraints.append(24 * aux_W_speedsaildays @ (KTS_levels - 0.5) <= line_distance)
 
 				for idx_kts in range(n_speed_level):
 					z_kts = line_KTS_vars[idx_kts]
@@ -846,6 +937,34 @@ class ServiceGraph:
 					constraints.append(aux_W_speedsaildays[idx_kts] >= -bigM_saildays * z_kts)
 					constraints.append(aux_W_speedsaildays[idx_kts] <= line_sailing_days + bigM_saildays * (1 - z_kts))
 					constraints.append(aux_W_speedsaildays[idx_kts] >= line_sailing_days - bigM_saildays * (1 - z_kts))
+
+				# 5. Buffer Constraint (Wait + Slack)
+				# Formula: Buffer = (T_wait + Dist * (1/v - 1/16.5)) / (168 * n_vessels)
+				#
+				# Linearization:
+				#   Numerator <= 0.30 * 168 * n_vessels
+				#   Numerator >= 0.15 * 168 * n_vessels (if not ignored)
+				
+				# 1. Retrieve Line Data
+				wait_times = line.get_buffer_wait_times()
+				ignore_lb = line.get_buffer_ignore_lb()
+				t_wait_total = sum(wait_times) if wait_times else 0.0
+				
+				# 2. Formulate Numerator Terms
+				inverse_speed_avg = line_KTS_vars @ [1.0/k for k in KTS_levels]
+				term_dist_inv_speed = line_distance * inverse_speed_avg
+				term_dist_ref_speed = line_distance / 16.5
+				numerator = t_wait_total + term_dist_inv_speed - term_dist_ref_speed
+				
+				# 3. Formulate Denominator 
+				# n_vessels is derived from week_vars (which is N)
+				n_vessels_expr = week_vars[idx_line] @ week_levels
+				denominator_hours = 24 * 7 * n_vessels_expr
+				
+				# 4. Add Constraints
+				constraints.append(numerator <= 0.30 * denominator_hours)
+				if not ignore_lb:
+					constraints.append(numerator >= 0.15 * denominator_hours)
 
 		# 4. Weekly Port Call Cost
 		for idx_line, line in enumerate(self.__lines_list):
@@ -874,18 +993,24 @@ class ServiceGraph:
 			for demand_vars_od, od, od_paths in zip(demand_vars, od_pairs, od_pair_paths):
 				expected_transit = portgraph.get_transit_time_by_idx(od[0], od[1])
 				
-				# Only apply penalty if transit time expectation exists
-				if expected_transit is not None and expected_transit > 0:
+				# Only apply penalty if transit time expectation exists and is valid
+				if expected_transit is not None and expected_transit > 0 and not np.isnan(expected_transit) and not np.isinf(expected_transit):
 					for idx_path, path in enumerate(od_paths):
 						x_od_p = demand_vars_od[idx_path]
 						
 						# Estimate path transit time
 						# 1. Sailing time based on distance and line speeds
 						path_sailing_time = 0.0
+						path_valid = True
 						for slot in path.tolist_slot():
 							line = slot.get_service()
 							idx_line = self.__lines_list.index(line)
 							slot_distance = slot.get_distance(portgraph)
+							
+							# Skip if distance is invalid
+							if slot_distance is None or np.isnan(slot_distance) or np.isinf(slot_distance) or slot_distance <= 0:
+								path_valid = False
+								break
 							
 							# Approximate speed: distance / sailing_days
 							# Use average speed of 14 kts as conservative estimate for penalty calculation
@@ -894,21 +1019,23 @@ class ServiceGraph:
 							slot_sailing_days = slot_distance / (24.0 * approx_speed_kts)
 							path_sailing_time += slot_sailing_days
 						
+						# Only apply penalty if path data is valid
+						if not path_valid:
+							continue
+						
 						# 2. Transshipment time at hubs
 						hubs = path.get_hubs()
-						transship_time = 0.0
-						for hub in hubs:
-							hub_idx = portgraph.get_unique_index(hub)
-							# Estimate transshipment time: assume 1 day per hub (conservative)
-							transship_time += 1.0
+						transship_time = float(len(hubs))  # 1 day per hub
 						
 						# Total estimated transit time
 						estimated_transit = path_sailing_time + transship_time
 						
 						# Penalty for tardiness: max(0, actual - expected) * flow * penalty_rate
-						if estimated_transit > expected_transit:
+						# Additional validation to prevent NaN/Inf
+						if estimated_transit > expected_transit and not np.isnan(estimated_transit) and not np.isinf(estimated_transit):
 							tardiness = estimated_transit - expected_transit
-							obj_expr += transit_penalty_mult * tardiness * x_od_p
+							if tardiness > 0 and tardiness < 1000:  # Cap unreasonably large tardiness
+								obj_expr += transit_penalty_mult * tardiness * x_od_p
 		#
 		# endregion		# region Key Constraints
 		# Constraint: (Weekly Demand Flow) sum X_{odp} >= (Weekly Demand) D_{od}
@@ -927,6 +1054,12 @@ class ServiceGraph:
 		ships_capacities = [s.vessel_capacity for s in vesselpool.vessels_list]
 		line_capacities = ship_vars @ ships_capacities  # shape = (line,)
 		bigM_line_capacity = tuneparams['BigM-line_capacity']
+		
+		# Constraint: Vessel Identity (Sum of ships == Weeks of roundtrip)
+		# This must hold regardless of speed optimization mode
+		for idx_line in range(n_lines):
+			n_vessels_expr = week_vars[idx_line] @ week_levels
+			constraints.append(cp.sum(ship_vars[idx_line, :]) == n_vessels_expr)
 
 		for idx_line in range(n_lines):
 			line_capacity = line_capacities[idx_line]
@@ -945,10 +1078,18 @@ class ServiceGraph:
 
 		# region Call Solver
 		prob = cp.Problem(cp.Minimize(obj_expr), constraints)
-		prob.solve(solver=cp.GUROBI, verbose=False)
-		# prob.solve(solver=cp.SCIP, verbose=False)
-		# prob.solve(solver=cp.ECOS)
-		# prob.solve(solver=cp.GLPK_MI)  # much slower than SCIP
+		try:
+			prob.solve(solver=cp.GUROBI, verbose=False, reoptimize=True)
+		except Exception:
+			try:
+				prob.solve(solver=cp.SCIP, verbose=False)
+			except Exception:
+				try:
+					# Try GLPK_MI if installed (common for MIP)
+					prob.solve(solver=cp.GLPK_MI, verbose=False)
+				except Exception:
+					# Fallback to whatever is available (likely ECOS_BB for small MIPs)
+					prob.solve()
 		#
 		#endregion
 
@@ -1093,7 +1234,14 @@ class ServiceGraph:
 		matrix_stay_days = np.array([[0 for _ in portgraph.tolist_port()] for _ in self.__lines_list], dtype=object)
 
 		for idx_line in range(n_lines):
-			matrix_stay_days[idx_line, :] = transshipments[idx_line, :] / ports_gross_prod / 24
+			stay_days_per_port = []
+			for idx_port, gross_prod in enumerate(ports_gross_prod):
+				if gross_prod > 0:
+					stay_days_per_port.append(transshipments[idx_line, idx_port] / gross_prod / 24)
+				else:
+					# Zero productivity: no port operations possible
+					stay_days_per_port.append(0)
+			matrix_stay_days[idx_line, :] = stay_days_per_port
 			obj_expr += matrix_stay_days[idx_line, :] @ ports_costs_transsip
 
 		# 3. Weekly Bunkering Cost

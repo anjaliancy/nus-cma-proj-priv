@@ -256,12 +256,18 @@ class ServiceLine:
 	__name: str
 	__line: list[Port]
 	week: int = 999999
+	_buffer_wait_times: list[float] | None
+	_buffer_speeds_to_next: list[float] | None
+	_buffer_ignore_lb: bool
 
-	def __init__(self, name: str, line: list[Port], _test: bool=False, verbose=False, warn=True):
+	def __init__(self, name: str, line: list[Port], _test: bool=False, verbose=False, warn=True, portgraph: PortGraph | None = None):
 		self.__name = name
 		self.__line = line
+		self._buffer_wait_times = None
+		self._buffer_speeds_to_next = None
+		self._buffer_ignore_lb = False
 
-		if (not _test) and False is self.check_valid(warn):
+		if (not _test) and False is self.check_valid(warn, portgraph=portgraph):
 			if verbose:
 				print(f'Invalid line "{name}":', line)
 			raise ValueError(f'Invalid line {name}')
@@ -269,7 +275,7 @@ class ServiceLine:
 	def __repr__(self) -> str:
 		return self.__name + ' -- ' + str(self.__line)
 
-	def check_valid(self, warn=True) -> bool:
+	def check_valid(self, warn=True, portgraph: PortGraph | None = None) -> bool:
 		"""Check whether the service line is a valid one
 		"""
 		# Case 1: include less than 2 ports
@@ -314,6 +320,31 @@ class ServiceLine:
 			if warn:
 				print(f"Warning: Invalid since service has {unique_ports} unique ports (max 20 allowed).")
 			return False
+			
+		## Case 6: Number of ports called more than once <= 2
+		# e.g., A-B-A-C-D-E-B-F-E (A, B, E repeated -> 3 ports -> Invalid)
+		num_multi_visit = sum(1 for ct in port_ctr.values() if ct > 1)
+		if num_multi_visit > 2:
+			if warn:
+				print(f"Warning: Invalid since {num_multi_visit} ports are visited more than once (max 2 allowed).")
+			return False
+			
+		## Case 7: Must visit at least one TS port
+		# Check if at least one port in the line has transshipment capacity
+		if not any(port.transshipment_capacity for port in self.__line):
+			if warn:
+				print("Warning: Invalid since service line must visit at least one TS port.")
+			return False
+
+		## Case 8: Max direct port to port connection = 2k miles
+		if portgraph is not None:
+			for slot in self.tolist_slot():
+				dist = slot.get_distance(portgraph)
+				if dist > 2000:
+					if warn:
+						print(f"Warning: Invalid since leg {slot.get_segment()} has distance {dist:.2f} (max 2000 allowed).")
+					return False
+
 		return True
 
 	def get_adjacency_matrix(self, ports_pool: PortPool) -> np.ndarray:
@@ -347,6 +378,35 @@ class ServiceLine:
 		for slot in self.tolist_slot():
 			total_dist += slot.get_distance(portgraph)
 		return total_dist
+
+	###########################################################################
+	# Buffer profile helpers (waiting time, speed to next, ignore lower bound)
+	###########################################################################
+	def set_buffer_profile(self,
+			wait_times: list[float] | None,
+			speeds_to_next: list[float] | None,
+			ignore_lower_bound: bool
+		):
+		"""Attach proforma-derived buffer data to the service line"""
+		if wait_times is not None and len(wait_times) != self.number_of_port():
+			raise ValueError("buffer wait_times length must match number of ports")
+		if speeds_to_next is not None and len(speeds_to_next) != self.number_of_port():
+			raise ValueError("buffer speeds_to_next length must match number of ports (one per leg origin)")
+		self._buffer_wait_times = wait_times
+		self._buffer_speeds_to_next = speeds_to_next
+		self._buffer_ignore_lb = ignore_lower_bound
+
+	def has_buffer_profile(self) -> bool:
+		return self._buffer_wait_times is not None and self._buffer_speeds_to_next is not None
+
+	def get_buffer_wait_times(self) -> list[float] | None:
+		return self._buffer_wait_times
+
+	def get_buffer_speeds_to_next(self) -> list[float] | None:
+		return self._buffer_speeds_to_next
+
+	def get_buffer_ignore_lb(self) -> bool:
+		return self._buffer_ignore_lb
 
 	def last_index_of_port(self, port: Port) -> int:
 		"""The last index of a port in a service line
@@ -418,7 +478,7 @@ class ServiceLine:
 	# Atomic Operations for Modifying Service Lines
 	###########################################################################
 
-	def shift_port(self, port_idx: int, delta: int, validate: bool = True) -> 'ServiceLine':
+	def shift_port(self, port_idx: int, delta: int, validate: bool = True, portgraph: PortGraph | None = None) -> 'ServiceLine':
 		"""Shift a port visit earlier or later in the rotation
 		
 		Args:
@@ -444,7 +504,7 @@ class ServiceLine:
 		
 		if delta == 0:
 			# No change, return copy
-			return ServiceLine(self.name(), self.__line.copy(), _test=not validate)
+			return ServiceLine(self.name(), self.__line.copy(), _test=not validate, portgraph=portgraph)
 		
 		# Create new sequence
 		sequence = self.__line.copy()
@@ -456,14 +516,14 @@ class ServiceLine:
 		
 		# Create and validate new service line
 		try:
-			new_line = ServiceLine(self.name(), sequence, _test=not validate)
-			if validate and not new_line.check_valid(warn=False):
+			new_line = ServiceLine(self.name(), sequence, _test=not validate, portgraph=portgraph)
+			if validate and not new_line.check_valid(warn=False, portgraph=portgraph):
 				raise ValueError(f"Shifting port at index {port_idx} by {delta} creates invalid service line")
 			return new_line
 		except ValueError as e:
 			raise ValueError(f"Shifting port at index {port_idx} by {delta} failed: {str(e)}")
 
-	def swap_ports(self, idx1: int, idx2: int, validate: bool = True) -> 'ServiceLine':
+	def swap_ports(self, idx1: int, idx2: int, validate: bool = True, portgraph: PortGraph | None = None) -> 'ServiceLine':
 		"""Swap two port visits in the rotation
 		
 		Args:
@@ -490,7 +550,7 @@ class ServiceLine:
 		
 		if idx1 == idx2:
 			# No change, return copy
-			return ServiceLine(self.name(), self.__line.copy(), _test=not validate)
+			return ServiceLine(self.name(), self.__line.copy(), _test=not validate, portgraph=portgraph)
 		
 		# Create new sequence with swapped ports
 		sequence = self.__line.copy()
@@ -498,8 +558,8 @@ class ServiceLine:
 		
 		# Create and validate new service line
 		try:
-			new_line = ServiceLine(self.name(), sequence, _test=not validate)
-			if validate and not new_line.check_valid(warn=False):
+			new_line = ServiceLine(self.name(), sequence, _test=not validate, portgraph=portgraph)
+			if validate and not new_line.check_valid(warn=False, portgraph=portgraph):
 				raise ValueError(f"Swapping ports at indices {idx1} and {idx2} creates invalid service line")
 			return new_line
 		except ValueError as e:
@@ -509,7 +569,7 @@ class ServiceLine:
 	# Multi-Step Action Macros (Composite Operations)
 	###########################################################################
 
-	def reverse_segment(self, start_idx: int, end_idx: int, validate: bool = True) -> 'ServiceLine':
+	def reverse_segment(self, start_idx: int, end_idx: int, validate: bool = True, portgraph: PortGraph | None = None) -> 'ServiceLine':
 		"""Reverse the order of ports in a segment of the rotation
 		
 		Args:
@@ -547,14 +607,14 @@ class ServiceLine:
 			sequence[:end_idx+1] = segment[len(sequence[start_idx:]):]
 		
 		try:
-			new_line = ServiceLine(self.name(), sequence, _test=not validate)
-			if validate and not new_line.check_valid(warn=False):
+			new_line = ServiceLine(self.name(), sequence, _test=not validate, portgraph=portgraph)
+			if validate and not new_line.check_valid(warn=False, portgraph=portgraph):
 				raise ValueError(f"Reversing segment [{start_idx}, {end_idx}] creates invalid service line")
 			return new_line
 		except ValueError as e:
 			raise ValueError(f"Reversing segment [{start_idx}, {end_idx}] failed: {str(e)}")
 
-	def rotate(self, steps: int, validate: bool = True) -> 'ServiceLine':
+	def rotate(self, steps: int, validate: bool = True, portgraph: PortGraph | None = None) -> 'ServiceLine':
 		"""Rotate the entire service line by a number of steps
 		
 		Args:
@@ -572,7 +632,7 @@ class ServiceLine:
 		n = self.number_of_port()
 		
 		if n == 0:
-			return ServiceLine(self.name(), self.__line.copy(), _test=not validate)
+			return ServiceLine(self.name(), self.__line.copy(), _test=not validate, portgraph=portgraph)
 		
 		# Normalize steps to be within [0, n)
 		steps = steps % n
@@ -581,14 +641,14 @@ class ServiceLine:
 		sequence = self.__line[-steps:] + self.__line[:-steps] if steps > 0 else self.__line.copy()
 		
 		try:
-			new_line = ServiceLine(self.name(), sequence, _test=not validate)
-			if validate and not new_line.check_valid(warn=False):
+			new_line = ServiceLine(self.name(), sequence, _test=not validate, portgraph=portgraph)
+			if validate and not new_line.check_valid(warn=False, portgraph=portgraph):
 				raise ValueError(f"Rotating by {steps} steps creates invalid service line")
 			return new_line
 		except ValueError as e:
 			raise ValueError(f"Rotating by {steps} steps failed: {str(e)}")
 
-	def insert_port(self, port: Port, position: int, validate: bool = True) -> 'ServiceLine':
+	def insert_port(self, port: Port, position: int, validate: bool = True, portgraph: PortGraph | None = None) -> 'ServiceLine':
 		"""Insert a port at a specific position in the rotation
 		
 		Args:
@@ -612,14 +672,14 @@ class ServiceLine:
 		sequence.insert(position, port)
 		
 		try:
-			new_line = ServiceLine(self.name(), sequence, _test=not validate)
-			if validate and not new_line.check_valid(warn=False):
+			new_line = ServiceLine(self.name(), sequence, _test=not validate, portgraph=portgraph)
+			if validate and not new_line.check_valid(warn=False, portgraph=portgraph):
 				raise ValueError(f"Inserting port {port.get_id()} at position {position} creates invalid service line")
 			return new_line
 		except ValueError as e:
 			raise ValueError(f"Inserting port {port.get_id()} at position {position} failed: {str(e)}")
 
-	def remove_port(self, position: int, validate: bool = True) -> 'ServiceLine':
+	def remove_port(self, position: int, validate: bool = True, portgraph: PortGraph | None = None) -> 'ServiceLine':
 		"""Remove a port at a specific position from the rotation
 		
 		Args:
@@ -642,14 +702,14 @@ class ServiceLine:
 		removed_port = sequence.pop(position)
 		
 		try:
-			new_line = ServiceLine(self.name(), sequence, _test=not validate)
-			if validate and not new_line.check_valid(warn=False):
+			new_line = ServiceLine(self.name(), sequence, _test=not validate, portgraph=portgraph)
+			if validate and not new_line.check_valid(warn=False, portgraph=portgraph):
 				raise ValueError(f"Removing port {removed_port.get_id()} at position {position} creates invalid service line")
 			return new_line
 		except ValueError as e:
 			raise ValueError(f"Removing port at position {position} failed: {str(e)}")
 
-	def move_port(self, from_idx: int, to_idx: int, validate: bool = True) -> 'ServiceLine':
+	def move_port(self, from_idx: int, to_idx: int, validate: bool = True, portgraph: PortGraph | None = None) -> 'ServiceLine':
 		"""Move a port from one position to another (combination of remove + insert)
 		
 		This is equivalent to shift_port but with explicit source and destination indices.
@@ -668,7 +728,7 @@ class ServiceLine:
 		"""
 		# Use shift_port since it's already implemented
 		delta = to_idx - from_idx
-		return self.shift_port(from_idx, delta, validate=validate)
+		return self.shift_port(from_idx, delta, validate=validate, portgraph=portgraph)
 
 	def plot(self, selected_countries: list[str], fig_size = (15, 9), eps = 2, center_pacific=False):
 		"""Plot the service line
@@ -901,7 +961,7 @@ class ServiceLine:
 	# 			re.append(action)
 	# 	return re
 
-	def apply_action(self, action: LineAction, ports_pool: PortPool, _test: bool = False) -> 'ServiceLine':
+	def apply_action(self, action: LineAction, ports_pool: PortPool, _test: bool = False, portgraph: PortGraph | None = None) -> 'ServiceLine':
 		"""Apply action to service line
 
 		Input:
@@ -935,10 +995,10 @@ class ServiceLine:
 			else: # idx == len(sequence) - 1
 				if p == sequence[0]:
 					sequence.pop(idx)
-		return ServiceLine(self.name(), sequence, _test)
+		return ServiceLine(self.name(), sequence, _test, portgraph=portgraph)
 
 def create_service_line(
-		name: str, port_ids: list[str], portpool: PortPool
+		name: str, port_ids: list[str], portpool: PortPool, portgraph: PortGraph | None = None
 ) -> ServiceLine:
 	"""Create a service line from a list of port IDs
 	"""
@@ -946,4 +1006,4 @@ def create_service_line(
 	for port_id in port_ids:
 		port = portpool.get_port(port_id)
 		port_lst.append(port)
-	return ServiceLine(name, port_lst)
+	return ServiceLine(name, port_lst, portgraph=portgraph)

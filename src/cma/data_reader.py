@@ -461,7 +461,8 @@ def read_cnc_proforma_data(portpool: PortPool, vesselpool: VesselPool) -> dict:
 				'vessel_rank': int(first_row['vrank']),
 				'vessel_capacity_nominal': first_row['cap_nom'],
 				'vessel_capacity_effective': first_row['cap_eff'],
-				'speed': first_row['vspeed'],  # First port speed, may vary
+				'speed': first_row['vspeed'],  
+				'ignore_buffer_lb': bool(first_row.get('ignore_buffer_lb', 0)),
 				'port_calls': len(port_ids),
 				'port_rotation': port_ids,
 				'total_duration': df_line['duration'].sum(),
@@ -486,11 +487,20 @@ def read_cnc_proforma_data(portpool: PortPool, vesselpool: VesselPool) -> dict:
 					'productivity': row['ops_prod'],
 					'allocation': row['alloc'],
 					'capacity_scale': row['cap_scale'],
-					'capacity_reserve': row['cap_reserve']
+					'capacity_reserve': row['cap_reserve'],
+					'ignore_buffer_lb': bool(row.get('ignore_buffer_lb', metadata[line_name]['ignore_buffer_lb']))
 				})
+
+			# Attach buffer-related profile to the service line for later use in optimization
+			waiting_times = [d['waiting_time'] for d in metadata[line_name]['port_details']]
+			speeds_to_next = [d['speed_to_next'] for d in metadata[line_name]['port_details']]
+			ignore_lb_flag = metadata[line_name]['ignore_buffer_lb']
+			if hasattr(line, 'set_buffer_profile'):
+				line.set_buffer_profile(waiting_times, speeds_to_next, ignore_lb_flag)
 			
 		except Exception as e:
 			# Some ports might not be in portpool, skip those lines
+			# some lines are not valid
 			continue
 	
 	return {
