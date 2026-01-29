@@ -25,6 +25,7 @@ data_file_port_productivity = "input/Port_Productivity.csv"
 data_file_portcall_costs = "input/Portcall_Costs.csv"
 data_file_port_waiting = "input/Port_WaitingTimes.csv"
 data_file_port_maneuvering = "input/Port_ManTimes.csv"
+data_file_port_apac = "data_2024-12-23/port_APAC.csv"
 
 # CNC demand data with transit time expectations
 data_file_demand_cnc = "input/demand_CNC_adjusted_comp.csv"
@@ -119,12 +120,23 @@ def read_port_data() -> Tuple[PortPool, PortPool]:
 	"""
 	port_pool = PortPool()
 	
+	# Step 0: Load APAC port subset (Far East and Oceania)
+	file_apac = resources.files('cma.res').joinpath(data_file_port_apac)
+	df_apac = pd.read_csv(file_apac)
+	df_apac['Region'] = df_apac['Region'].astype(str)
+	apac_port_ids = set(df_apac[df_apac['Region'].str.contains('FAR EAST|OCEANIA', na=False)]['Port_Code'])
+
 	# Step 1: Load basic port data from CSV (all 182 ports)
 	file_basic = resources.files('cma.res').joinpath(data_file_port)
 	df_port = pd.read_csv(file_basic)
 	df_port = df_port.rename(columns=lambda x: x.strip())
 	
 	for _, row in df_port.iterrows():
+		port_id = row['PortID']
+		# Skip non-APAC ports
+		if port_id not in apac_port_ids:
+			continue
+
 		# Handle dummy values
 		transshipment_cost = row['TranshipmentCost']
 		if transshipment_cost == 5000:

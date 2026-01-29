@@ -878,6 +878,11 @@ class ServiceGraph:
 		for idx_line, line in enumerate(self.__lines_list):
 			line_ship_vars = ship_vars[idx_line, :]   # shape = (rank,)
 			line_distance = line.get_distance(portgraph)
+			
+			# Robustness: Skip buffer constraint if distance is invalid (inf)
+			# Operations like inf - inf produce NaN, which crashes Gurobi.
+			is_distance_invalid = np.isinf(line_distance) or line_distance <= 0
+
 			# Handle both decision variable and array cases
 			if tuneparams.get('turnon-port_operations_constraint', 1) > 0.5:
 				line_port_stay_days = cp.sum(matrix_stay_days[idx_line, :])
@@ -889,37 +894,43 @@ class ServiceGraph:
 
 			if tuneparams['turnon-vessel_speed_optimization'] > 1/2:
 				obj_expr += 7 * line_ship_vars @ vesselpool.get_bukering_cost_middle()
-				# Constraint: KTS_min <= Speed (distance / sailing days) <= KTS_max
-				constraints.append(line_sailing_days >= 0.5 * 7)
-				constraints.append(line_distance >= 24 * line_sailing_days * (KTS_levels[0] - buf))
-				constraints.append(line_distance <= 24 * line_sailing_days * (KTS_levels[-1] + buf))
 				
-				# Buffer Constraint (Mode 1 - Continuous)
-				# Buffer = (T_wait + Dist * (1/v - 1/16.5)) / (168 * n_vessels)
-				# Dist/v = Sailing Time = line_sailing_days * 24
-				# So Numerator = T_wait + 24 * line_sailing_days - Dist/16.5
-				
-				wait_times = line.get_buffer_wait_times()
-				ignore_lb = line.get_buffer_ignore_lb()
-				t_wait_total = sum(wait_times) if wait_times else 0.0
-				
-				numerator = t_wait_total + 24 * line_sailing_days - line_distance / 16.5
-				n_vessels_expr = week_vars[idx_line] @ week_levels
-				denominator_hours = 168 * n_vessels_expr
-				
-				# Soft constraints with penalties
-				buffer_penalty_lb = tuneparams.get('ctrparam-buffer_penalty_below_15pct', 1000.0)
-				buffer_penalty_ub = tuneparams.get('ctrparam-buffer_penalty_above_30pct', 2000.0)
+				if not is_distance_invalid:
+					# Constraint: KTS_min <= Speed (distance / sailing days) <= KTS_max
+					constraints.append(line_sailing_days >= 0.5 * 7)
+					constraints.append(line_distance >= 24 * line_sailing_days * (KTS_levels[0] - buf))
+					constraints.append(line_distance <= 24 * line_sailing_days * (KTS_levels[-1] + buf))
+					
+					# Buffer Constraint (Mode 1 - Continuous)
+					# Buffer = (T_wait + Dist * (1/v - 1/16.5)) / (168 * n_vessels)
+					# Dist/v = Sailing Time = line_sailing_days * 24
+					# So Numerator = T_wait + 24 * line_sailing_days - Dist/16.5
+					
+					wait_times = line.get_buffer_wait_times()
+					ignore_lb = line.get_buffer_ignore_lb()
+					t_wait_total = sum(wait_times) if wait_times else 0.0
+					
+					numerator = t_wait_total + 24 * line_sailing_days - line_distance / 16.5
+					n_vessels_expr = week_vars[idx_line] @ week_levels
+					denominator_hours = 168 * n_vessels_expr
+					
+					# Soft constraints with penalties
+					buffer_penalty_lb = tuneparams.get('ctrparam-buffer_penalty_below_15pct', 1000.0)
+					buffer_penalty_ub = tuneparams.get('ctrparam-buffer_penalty_above_30pct', 2000.0)
 
-				constraints.append(numerator <= 0.30 * denominator_hours + buffer_violation_ub[idx_line])
-				obj_expr += buffer_penalty_ub * buffer_violation_ub[idx_line]
-				
-				if not ignore_lb:
-					constraints.append(numerator >= 0.15 * denominator_hours - buffer_violation_lb[idx_line])
-					obj_expr += buffer_penalty_lb * buffer_violation_lb[idx_line]
+					constraints.append(numerator <= 0.30 * denominator_hours + buffer_violation_ub[idx_line])
+					obj_expr += buffer_penalty_ub * buffer_violation_ub[idx_line]
+					
+					if not ignore_lb:
+						constraints.append(numerator >= 0.15 * denominator_hours - buffer_violation_lb[idx_line])
+						obj_expr += buffer_penalty_lb * buffer_violation_lb[idx_line]
+					else:
+						# If ignore_lb, we still need to constrain the slack to zero or just not use it
+						constraints.append(buffer_violation_lb[idx_line] == 0)
 				else:
-					# If ignore_lb, we still need to constrain the slack to zero or just not use it
+					# Distance is invalid: disable buffer slacks for this line
 					constraints.append(buffer_violation_lb[idx_line] == 0)
+					constraints.append(buffer_violation_ub[idx_line] == 0)
 
 			else:  # if we want to further optimize the bukering cost by determine optimal speed
 				# Auxiliary Variable:
@@ -941,53 +952,58 @@ class ServiceGraph:
 				constraints.append(aux_W_shipspeed <= line_ship_stack + big_M_nship * (1 - KTS_line_stack))
 				constraints.append(aux_W_shipspeed >= line_ship_stack - big_M_nship * (1 - KTS_line_stack))
 
-				# Constraint: Optimal Speed * Sailing Days ~= Distance
-				aux_W_speedsaildays = cp.Variable(shape=n_speed_level)
-				constraints.append(24 * aux_W_speedsaildays @ (KTS_levels + 0.5) >= line_distance)
-				constraints.append(24 * aux_W_speedsaildays @ (KTS_levels - 0.5) <= line_distance)
+				if not is_distance_invalid:
+					# Constraint: Optimal Speed * Sailing Days ~= Distance
+					aux_W_speedsaildays = cp.Variable(shape=n_speed_level)
+					constraints.append(24 * aux_W_speedsaildays @ (KTS_levels + 0.5) >= line_distance)
+					constraints.append(24 * aux_W_speedsaildays @ (KTS_levels - 0.5) <= line_distance)
 
-				for idx_kts in range(n_speed_level):
-					z_kts = line_KTS_vars[idx_kts]
-					constraints.append(aux_W_speedsaildays[idx_kts] <= bigM_saildays * z_kts)
-					constraints.append(aux_W_speedsaildays[idx_kts] >= -bigM_saildays * z_kts)
-					constraints.append(aux_W_speedsaildays[idx_kts] <= line_sailing_days + bigM_saildays * (1 - z_kts))
-					constraints.append(aux_W_speedsaildays[idx_kts] >= line_sailing_days - bigM_saildays * (1 - z_kts))
+					for idx_kts in range(n_speed_level):
+						z_kts = line_KTS_vars[idx_kts]
+						constraints.append(aux_W_speedsaildays[idx_kts] <= bigM_saildays * z_kts)
+						constraints.append(aux_W_speedsaildays[idx_kts] >= -bigM_saildays * z_kts)
+						constraints.append(aux_W_speedsaildays[idx_kts] <= line_sailing_days + bigM_saildays * (1 - z_kts))
+						constraints.append(aux_W_speedsaildays[idx_kts] >= line_sailing_days - bigM_saildays * (1 - z_kts))
 
-				# 5. Buffer Constraint (Wait + Slack)
-				# Formula: Buffer = (T_wait + Dist * (1/v - 1/16.5)) / (168 * n_vessels)
-				#
-				# Linearization:
-				#   Numerator <= 0.30 * 168 * n_vessels
-				#   Numerator >= 0.15 * 168 * n_vessels (if not ignored)
-				
-				# 1. Retrieve Line Data
-				wait_times = line.get_buffer_wait_times()
-				ignore_lb = line.get_buffer_ignore_lb()
-				t_wait_total = sum(wait_times) if wait_times else 0.0
-				
-				# 2. Formulate Numerator Terms
-				inverse_speed_avg = line_KTS_vars @ [1.0/k for k in KTS_levels]
-				term_dist_inv_speed = line_distance * inverse_speed_avg
-				term_dist_ref_speed = line_distance / 16.5
-				numerator = t_wait_total + term_dist_inv_speed - term_dist_ref_speed
-				
-				# 3. Formulate Denominator 
-				# n_vessels is derived from week_vars (which is N)
-				n_vessels_expr = week_vars[idx_line] @ week_levels
-				denominator_hours = 24 * 7 * n_vessels_expr
-				
-				# 4. Add Constraints (Soft with penalties)
-				buffer_penalty_lb = tuneparams.get('ctrparam-buffer_penalty_below_15pct', 1000.0)
-				buffer_penalty_ub = tuneparams.get('ctrparam-buffer_penalty_above_30pct', 2000.0)
+					# 5. Buffer Constraint (Wait + Slack)
+					# Formula: Buffer = (T_wait + Dist * (1/v - 1/16.5)) / (168 * n_vessels)
+					#
+					# Linearization:
+					#   Numerator <= 0.30 * 168 * n_vessels
+					#   Numerator >= 0.15 * 168 * n_vessels (if not ignored)
+					
+					# 1. Retrieve Line Data
+					wait_times = line.get_buffer_wait_times()
+					ignore_lb = line.get_buffer_ignore_lb()
+					t_wait_total = sum(wait_times) if wait_times else 0.0
+					
+					# 2. Formulate Numerator Terms
+					inverse_speed_avg = line_KTS_vars @ [1.0/k for k in KTS_levels]
+					term_dist_inv_speed = line_distance * inverse_speed_avg
+					term_dist_ref_speed = line_distance / 16.5
+					numerator = t_wait_total + term_dist_inv_speed - term_dist_ref_speed
+					
+					# 3. Formulate Denominator 
+					# n_vessels is derived from week_vars (which is N)
+					n_vessels_expr = week_vars[idx_line] @ week_levels
+					denominator_hours = 24 * 7 * n_vessels_expr
+					
+					# 4. Add Constraints (Soft with penalties)
+					buffer_penalty_lb = tuneparams.get('ctrparam-buffer_penalty_below_15pct', 1000.0)
+					buffer_penalty_ub = tuneparams.get('ctrparam-buffer_penalty_above_30pct', 2000.0)
 
-				constraints.append(numerator <= 0.30 * denominator_hours + buffer_violation_ub[idx_line])
-				obj_expr += buffer_penalty_ub * buffer_violation_ub[idx_line]
+					constraints.append(numerator <= 0.30 * denominator_hours + buffer_violation_ub[idx_line])
+					obj_expr += buffer_penalty_ub * buffer_violation_ub[idx_line]
 
-				if not ignore_lb:
-					constraints.append(numerator >= 0.15 * denominator_hours - buffer_violation_lb[idx_line])
-					obj_expr += buffer_penalty_lb * buffer_violation_lb[idx_line]
+					if not ignore_lb:
+						constraints.append(numerator >= 0.15 * denominator_hours - buffer_violation_lb[idx_line])
+						obj_expr += buffer_penalty_lb * buffer_violation_lb[idx_line]
+					else:
+						constraints.append(buffer_violation_lb[idx_line] == 0)
 				else:
+					# Distance is invalid: disable buffer slacks for this line
 					constraints.append(buffer_violation_lb[idx_line] == 0)
+					constraints.append(buffer_violation_ub[idx_line] == 0)
 
 		# 4. Weekly Port Call Cost
 		for idx_line, line in enumerate(self.__lines_list):
