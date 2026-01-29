@@ -712,6 +712,11 @@ class ServiceGraph:
 		n_weeks = len(week_levels)
 		week_vars = cp.Variable(shape=(n_lines, n_weeks), name='N', boolean=True)
 		constraints.append(cp.sum(week_vars, axis=1)==1)
+
+		# (5) Create Buffer Violation Slack Variables
+		#     s_LB_{line}, s_UB_{line}
+		buffer_violation_lb = cp.Variable(shape=(n_lines,), name='buffer_violation_lb', nonneg=True)
+		buffer_violation_ub = cp.Variable(shape=(n_lines,), name='buffer_violation_ub', nonneg=True)
 		#
 		# endregion
 
@@ -902,9 +907,19 @@ class ServiceGraph:
 				n_vessels_expr = week_vars[idx_line] @ week_levels
 				denominator_hours = 168 * n_vessels_expr
 				
-				constraints.append(numerator <= 0.30 * denominator_hours)
+				# Soft constraints with penalties
+				buffer_penalty_lb = tuneparams.get('ctrparam-buffer_penalty_below_15pct', 1000.0)
+				buffer_penalty_ub = tuneparams.get('ctrparam-buffer_penalty_above_30pct', 2000.0)
+
+				constraints.append(numerator <= 0.30 * denominator_hours + buffer_violation_ub[idx_line])
+				obj_expr += buffer_penalty_ub * buffer_violation_ub[idx_line]
+				
 				if not ignore_lb:
-					constraints.append(numerator >= 0.15 * denominator_hours)
+					constraints.append(numerator >= 0.15 * denominator_hours - buffer_violation_lb[idx_line])
+					obj_expr += buffer_penalty_lb * buffer_violation_lb[idx_line]
+				else:
+					# If ignore_lb, we still need to constrain the slack to zero or just not use it
+					constraints.append(buffer_violation_lb[idx_line] == 0)
 
 			else:  # if we want to further optimize the bukering cost by determine optimal speed
 				# Auxiliary Variable:
@@ -961,10 +976,18 @@ class ServiceGraph:
 				n_vessels_expr = week_vars[idx_line] @ week_levels
 				denominator_hours = 24 * 7 * n_vessels_expr
 				
-				# 4. Add Constraints
-				constraints.append(numerator <= 0.30 * denominator_hours)
+				# 4. Add Constraints (Soft with penalties)
+				buffer_penalty_lb = tuneparams.get('ctrparam-buffer_penalty_below_15pct', 1000.0)
+				buffer_penalty_ub = tuneparams.get('ctrparam-buffer_penalty_above_30pct', 2000.0)
+
+				constraints.append(numerator <= 0.30 * denominator_hours + buffer_violation_ub[idx_line])
+				obj_expr += buffer_penalty_ub * buffer_violation_ub[idx_line]
+
 				if not ignore_lb:
-					constraints.append(numerator >= 0.15 * denominator_hours)
+					constraints.append(numerator >= 0.15 * denominator_hours - buffer_violation_lb[idx_line])
+					obj_expr += buffer_penalty_lb * buffer_violation_lb[idx_line]
+				else:
+					constraints.append(buffer_violation_lb[idx_line] == 0)
 
 		# 4. Weekly Port Call Cost
 		for idx_line, line in enumerate(self.__lines_list):
@@ -1101,6 +1124,8 @@ class ServiceGraph:
 			'ships': ship_vars,
 			'port staying days': matrix_stay_days,
 			'line sailing days': list_saildays,
+			'buffer violation lb': buffer_violation_lb,
+			'buffer violation ub': buffer_violation_ub,
 		}
 
 	def fulfill_demands_2(self,
