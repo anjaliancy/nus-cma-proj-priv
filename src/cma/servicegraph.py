@@ -1151,15 +1151,25 @@ class ServiceGraph:
 
 		# region Call Solver
 		prob = cp.Problem(cp.Minimize(obj_expr), constraints)
+		
+		# Extract solver hyperparameters from tuneparams (keys starting with 'solver-')
+		solver_kwargs = {'verbose': False}
+		for key, value in tuneparams.items():
+			if key.startswith('solver-'):
+				param_name = key.replace('solver-', '')
+				solver_kwargs[param_name] = value
+
 		try:
-			prob.solve(solver=cp.GUROBI, verbose=False, reoptimize=True)
+			prob.solve(solver=cp.GUROBI, reoptimize=True, **solver_kwargs)
 		except Exception:
 			try:
-				prob.solve(solver=cp.SCIP, verbose=False)
+				# Filter out Gurobi-specific params for SCIP if any
+				scip_kwargs = {k: v for k, v in solver_kwargs.items() if k not in ['MIPGap', 'TimeLimit', 'MIPFocus']}
+				prob.solve(solver=cp.SCIP, **scip_kwargs)
 			except Exception:
 				try:
 					# Try GLPK_MI if installed (common for MIP)
-					prob.solve(solver=cp.GLPK_MI, verbose=False)
+					prob.solve(solver=cp.GLPK_MI, verbose=solver_kwargs.get('verbose', False))
 				except Exception:
 					# Fallback to whatever is available (likely ECOS_BB for small MIPs)
 					prob.solve()
