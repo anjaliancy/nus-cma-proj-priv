@@ -442,6 +442,7 @@ class ServiceGraph:
 				'turnon-vessel_speed_optimization': 0,       # making the algorithm super slow
 				'ctrparam-kts_buffer': 0,
 				'ctrparam-transship_A': 100,
+				'unfulfilled_demand_penalty': 1e6,
 				'BigM-transship': 10000,
 				'BigM-n_ships' : 2,  # at most 2 ships of the same type
 				'BigM-saildays': 64,  # at most 9 weeks, hence less than 64 days
@@ -513,6 +514,7 @@ class ServiceGraph:
 				'turnon-transit_time_penalty': 1,            # penalize paths exceeding expected transit time
 				'ctrparam-kts_buffer': 0,
 				'ctrparam-transship_A': 100,
+				'unfulfilled_demand_penalty': 1e6,
 				'ctrparam-speed_soft_cap_kts': 16.5,         # soft cap for speed (penalty above this)
 				'ctrparam-speed_penalty_multiplier': 2.0,    # multiply fuel cost by this factor above soft cap
 				'ctrparam-transit_penalty_multiplier': 1000.0,  # USD per TEU-day of excess transit time
@@ -717,6 +719,10 @@ class ServiceGraph:
 		#     s_LB_{line}, s_UB_{line}
 		buffer_violation_lb = cp.Variable(shape=(n_lines,), name='buffer_violation_lb', nonneg=True)
 		buffer_violation_ub = cp.Variable(shape=(n_lines,), name='buffer_violation_ub', nonneg=True)
+
+		# (6) Create Unfulfilled Demand Slack Variables
+		#     eps_{od}
+		eps_vars = cp.Variable(shape=(len(od_pairs),), name='unfulfilled_demand', nonneg=True)
 		#
 		# endregion
 
@@ -1075,15 +1081,18 @@ class ServiceGraph:
 							tardiness = estimated_transit - expected_transit
 							if tardiness > 0 and tardiness < 1000:  # Cap unreasonably large tardiness
 								obj_expr += transit_penalty_mult * tardiness * x_od_p
+
+		# 6. Weekly Unfulfilled Demand Penalty
+		obj_expr += cp.sum(eps_vars) * tuneparams.get('unfulfilled_demand_penalty', 1e6)
 		#
 		# endregion		# region Key Constraints
 		# Constraint: (Weekly Demand Flow) sum X_{odp} >= (Weekly Demand) D_{od}
-		for pair_od, demand_vars_od in zip(od_pairs, demand_vars):
+		for idx_od, (pair_od, demand_vars_od) in enumerate(zip(od_pairs, demand_vars)):
 			demand_od = portgraph.get_demand_by_idx(pair_od[0], pair_od[1])
 			demand_od_fulfill = 0
 			for x_od_p in demand_vars_od:
 				demand_od_fulfill += x_od_p
-			constraints.append(demand_od_fulfill >= demand_od)
+			constraints.append(demand_od_fulfill >= demand_od - eps_vars[idx_od])
 
 		# Constraint: (Weekly Edge Flow) sum_T Y_{T, i, j} >= (Weekly Line Demand Flow) sum_{p has (i,j)} X_{o, d, p}
 		for seg_id, seg_demand_flow in seg_demand_flows.items():
@@ -1142,6 +1151,7 @@ class ServiceGraph:
 			'line sailing days': list_saildays,
 			'buffer violation lb': buffer_violation_lb,
 			'buffer violation ub': buffer_violation_ub,
+			'unfulfilled demand': eps_vars,
 		}
 
 	def fulfill_demands_2(self,
