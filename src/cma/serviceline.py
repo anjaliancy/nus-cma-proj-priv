@@ -255,7 +255,10 @@ class ServiceLine:
 	"""
 	__name: str
 	__line: list[Port]
-	week: int = 999999
+	week: float = 999999.0
+	frozen: bool = False
+	frozen_speed: float | None = None
+	frozen_weeks: float | None = None
 	_buffer_wait_times: list[float] | None
 	_buffer_speeds_to_next: list[float] | None
 	_buffer_ignore_lb: bool

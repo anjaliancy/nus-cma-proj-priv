@@ -33,6 +33,7 @@ data_file_demand_cnc = "input/demand_CNC_adjusted_comp.csv"
 # CNC proforma service lines (34 service lines with operational details)
 data_file_proforma = "input/proforma_CNC.csv"
 data_file_current_line = "data_2024-12-23/CURR_LINES_Dataset.xlsx"
+data_file_current_line_detail = "data_2024-12-23/CURR_LINES_detail_Dataset.xlsx"
 
 def read_vessel_class_data() -> VesselPool:
 	"""Read vessel class data from CNC input/Vessel_Nominal.csv
@@ -404,6 +405,12 @@ def read_current_line_data(portpool: PortPool,
 	df = pd.read_excel(file, sheet_name='Sheet1')  # read first table
 	df = df.rename(columns=lambda x: x.strip())    # trim titles
 
+	# Load frozen lines details
+	file_detail = resources.files('cma.res').joinpath(data_file_current_line_detail)
+	df_detail = pd.read_excel(file_detail)
+	df_detail = df_detail.rename(columns=lambda x: x.strip())
+	detail_dict = df_detail.set_index('Line Name').to_dict('index')
+
 	df_grouped = df.groupby('Line Name').agg({
 		'Port ID': list,
 		'Port Call Day': list,
@@ -422,9 +429,23 @@ def read_current_line_data(portpool: PortPool,
 			line = ServiceLine(line_name, port_list, verbose=verbose, warn=warn)
 		except:
 			continue
+		
+		# Set basic week
 		line.week = total_weeks
+		
+		# Set frozen attributes if available
+		if line_name in detail_dict:
+			detail = detail_dict[line_name]
+			line.frozen = str(detail.get('Frozen', 'No')).strip().lower() == 'yes'
+			line.frozen_speed = float(detail.get('Service Speed (nautical miles per hour)', 0))
+			line.frozen_weeks = float(detail.get('Number of vessels', total_weeks))
+			
+			# If frozen, ensure line.week matches frozen_weeks for MILP consistency
+			if line.frozen:
+				line.week = line.frozen_weeks
+
 		current_lines.append(line)
-		current_lines_weeks.append(total_weeks)
+		current_lines_weeks.append(line.week)
 	return current_lines, current_lines_weeks
 
 def read_cnc_proforma_data(portpool: PortPool, vesselpool: VesselPool) -> dict:

@@ -209,13 +209,20 @@ class ServiceGraph:
 		"""
 		analyzer = MatrixAnalyzer(self.get_adjacency_matrices(portgraph))
 		actions_dict = analyzer.find_valid_k(portgraph)
+		
+		# Filter out actions for frozen lines
+		filtered_actions_dict = {}
+		for line_idx, line_actions in actions_dict.items():
+			if not self.__lines_list[line_idx].frozen:
+				filtered_actions_dict[line_idx] = line_actions
+		
 		actions_list = [
 			GraphAction(line_key, action_key, action)
-			for line_key, line_actions in actions_dict.items()
+			for line_key, line_actions in filtered_actions_dict.items()
 			for action_key, actions in line_actions.items()
 			for action in actions
 		]
-		return actions_dict, actions_list
+		return filtered_actions_dict, actions_list
 #
 # endregion
 
@@ -715,6 +722,13 @@ class ServiceGraph:
 		week_vars = cp.Variable(shape=(n_lines, n_weeks), name='N', boolean=True)
 		constraints.append(cp.sum(week_vars, axis=1)==1)
 
+		# Fix weeks for frozen lines
+		for idx_line, line in enumerate(self.__lines_list):
+			if line.frozen and line.frozen_weeks is not None:
+				# Find index of week_levels closest to line.frozen_weeks
+				wk_idx = np.argmin([abs(w - line.frozen_weeks) for w in week_levels])
+				constraints.append(week_vars[idx_line, wk_idx] == 1)
+
 		# (5) Create Buffer Violation Slack Variables
 		#     s_LB_{line}, s_UB_{line}
 		buffer_violation_lb = cp.Variable(shape=(n_lines,), name='buffer_violation_lb', nonneg=True)
@@ -898,6 +912,12 @@ class ServiceGraph:
 			list_saildays.append(line_sailing_days)
 			buf = tuneparams['ctrparam-kts_buffer']
 
+			# Constraints for frozen lines
+			if line.frozen and line.frozen_speed is not None and line.frozen_speed > 0:
+				if not is_distance_invalid:
+					# Fix sailing days based on frozen speed: Sailing Days = Distance / (Speed * 24)
+					constraints.append(line_sailing_days * 24 * line.frozen_speed == line_distance)
+
 			if tuneparams['turnon-vessel_speed_optimization'] > 1/2:
 				obj_expr += 7 * line_ship_vars @ vesselpool.get_bukering_cost_middle()
 				
@@ -948,6 +968,11 @@ class ServiceGraph:
 				#     KTS_vars_{k}
 				line_KTS_vars = cp.Variable(name='Z', shape=(n_speed_level), boolean=True)  # shape = (speed,)
 				constraints.append(cp.sum(line_KTS_vars) == 1)
+
+				# Fix speed for frozen lines
+				if line.frozen and line.frozen_speed is not None and line.frozen_speed > 0:
+					kts_idx = np.argmin([abs(k - line.frozen_speed) for k in KTS_levels])
+					constraints.append(line_KTS_vars[kts_idx] == 1)
 
 				KTS_line_stack = cp.vstack([line_KTS_vars] * n_vessel_class)
 				line_ship_stack = cp.vstack([line_ship_vars] * n_speed_level).T
@@ -1174,6 +1199,11 @@ class ServiceGraph:
 
 		# predict weeks
 		week_vars = apply_prediction(model, self.__lines_list, portgraph, vesselpool)
+		
+		# Override weeks for frozen lines
+		for idx_line, line in enumerate(self.__lines_list):
+			if line.frozen and line.frozen_weeks is not None:
+				week_vars[idx_line] = line.frozen_weeks
 
 		for week in week_vars:
 			if week > max_transit_time:
