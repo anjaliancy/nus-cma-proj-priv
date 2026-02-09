@@ -923,7 +923,7 @@ class ServiceGraph:
 				
 				if not is_distance_invalid:
 					# Constraint: KTS_min <= Speed (distance / sailing days) <= KTS_max
-					constraints.append(line_sailing_days >= 0.5 * 7)
+					# constraints.append(line_sailing_days >= 0.5 * 7)
 					constraints.append(line_distance >= 24 * line_sailing_days * (KTS_levels[0] - buf))
 					constraints.append(line_distance <= 24 * line_sailing_days * (KTS_levels[-1] + buf))
 					
