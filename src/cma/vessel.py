@@ -125,3 +125,11 @@ class VesselPool:
 
 	def get_number_of_types(self) -> int:
 		return len(self.vessels_list)
+
+	def get_speed_levels(self) -> np.ndarray:
+		"""
+		Return the speed levels (kts) available in the bunkering cost data
+		"""
+		if not self.vessels_list:
+			return np.array([])
+		return self.vessels_list[0].bunkering_cost_coefs['speed'].values

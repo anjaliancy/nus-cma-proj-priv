@@ -713,8 +713,7 @@ class ServiceGraph:
 
 		# (3) Create Number of Vessels for Each Line
 		#     V_{ line, rank }
-		ship_vars = cp.Variable(shape=(n_lines, n_vessel_class), name='V', integer=True)
-		constraints.append(ship_vars >= 0)
+		ship_vars = cp.Variable(shape=(n_lines, n_vessel_class), name='V', integer=True, nonneg=True)
 
 		# (4) Create Number of Weeks for Each Line
 		#     N_{ line, n }
@@ -882,8 +881,9 @@ class ServiceGraph:
 
 		# 3. Weekly Bukering Cost
 		daily_bukering_cost_rates, speed_level0 = vesselpool.get_bukering_costs()  # shape = (rank, speed)
-		n_speed_level = daily_bukering_cost_rates.shape[1]
-		KTS_levels = np.arange(speed_level0, speed_level0 + n_speed_level)
+		KTS_levels = vesselpool.get_speed_levels()
+		n_speed_level = len(KTS_levels)
+		speed_step = KTS_levels[1] - KTS_levels[0] if n_speed_level > 1 else 1.0
 		
 		# Apply speed soft cap penalty for speeds > 16.5 kts
 		speed_soft_cap = tuneparams.get('ctrparam-speed_soft_cap_kts', 16.5)
@@ -910,7 +910,7 @@ class ServiceGraph:
 				line_port_stay_days = np.sum(matrix_stay_days[idx_line, :])
 			line_sailing_days = 7 * (week_vars[idx_line, :] @ week_levels) - line_port_stay_days
 			list_saildays.append(line_sailing_days)
-			buf = tuneparams['ctrparam-kts_buffer']
+			buf = 0.5  # Fixed tolerance level
 
 			# Constraints for frozen lines
 			if line.frozen and line.frozen_speed is not None and line.frozen_speed > 0:
@@ -986,8 +986,8 @@ class ServiceGraph:
 				if not is_distance_invalid:
 					# Constraint: Optimal Speed * Sailing Days ~= Distance
 					aux_W_speedsaildays = cp.Variable(shape=n_speed_level)
-					constraints.append(24 * aux_W_speedsaildays @ (KTS_levels + 0.5) >= line_distance)
-					constraints.append(24 * aux_W_speedsaildays @ (KTS_levels - 0.5) <= line_distance)
+					constraints.append(24 * aux_W_speedsaildays @ (KTS_levels + speed_step / 2) >= line_distance)
+					constraints.append(24 * aux_W_speedsaildays @ (KTS_levels - speed_step / 2) <= line_distance)
 
 					for idx_kts in range(n_speed_level):
 						z_kts = line_KTS_vars[idx_kts]
@@ -1239,8 +1239,7 @@ class ServiceGraph:
 
 		# (3) Create Number of Vessels for Each Line
 		#     V_{ line, rank }
-		ship_vars = cp.Variable(shape=(n_lines, n_vessel_class), name='V', integer=True)
-		constraints.append(ship_vars >= 0)
+		ship_vars = cp.Variable(shape=(n_lines, n_vessel_class), name='V', integer=True, nonneg=True)
 		#
 		# endregion
 
@@ -1411,6 +1410,7 @@ class ServiceGraph:
 		"""
 		n_lines = len(self.__lines_list)
 		n_vessel_class = len(vesselpool.vessels_list)
+
 		middle_speed = 16  # between 12-19, see LINERLIB Data `fleet_data.csv`
 
 		# initial prediction of weeks
@@ -1480,8 +1480,7 @@ class ServiceGraph:
 
 		# (3) Create Number of Vessels for Each Line
 		#     V_{ line, rank }
-		ship_vars = cp.Variable(shape=(n_lines, n_vessel_class), name='V', integer=True)
-		constraints.append(ship_vars >= 0)
+		ship_vars = cp.Variable(shape=(n_lines, n_vessel_class), name='V', integer=True, nonneg=True)
 		#
 		# endregion
 
