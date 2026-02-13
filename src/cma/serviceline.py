@@ -259,6 +259,9 @@ class ServiceLine:
 	frozen: bool = False
 	frozen_speed: float | None = None
 	frozen_weeks: float | None = None
+	anchor_eosp_wd: float | None = None
+	anchor_eosp_hr: float | None = None
+	proforma_leg_durations: list[float] | None = None
 	_buffer_wait_times: list[float] | None
 	_buffer_speeds_to_next: list[float] | None
 	_buffer_ignore_lb: bool
@@ -411,6 +414,100 @@ class ServiceLine:
 	def get_buffer_ignore_lb(self) -> bool:
 		return self._buffer_ignore_lb
 
+	###########################################################################
+	# Schedule profile helpers (anchor EOSP, proforma leg durations)
+	###########################################################################
+	def set_schedule_profile(self,
+			anchor_wd: float | None,
+			anchor_hr: float | None,
+			leg_durations: list[float] | None
+		):
+		"""Attach proforma-derived schedule data to the service line"""
+		if leg_durations is not None and len(leg_durations) != self.number_of_port():
+			raise ValueError("leg_durations length must match number of ports")
+		self.anchor_eosp_wd = anchor_wd
+		self.anchor_eosp_hr = anchor_hr
+		self.proforma_leg_durations = leg_durations
+
+	def has_schedule_profile(self) -> bool:
+		return self.anchor_eosp_wd is not None and self.anchor_eosp_hr is not None
+
+	def get_anchor_eosp(self) -> tuple[float | None, float | None]:
+		return self.anchor_eosp_wd, self.anchor_eosp_hr
+
+	def get_proforma_leg_durations(self) -> list[float] | None:
+		return self.proforma_leg_durations
+
+	def get_schedule(self, portgraph: PortGraph) -> list[tuple[float, float]]:
+		"""
+		Calculate Estimated Time of Berth (ETB) and Estimated Time of Departure (ETD) 
+		for each port in the rotation, in hours from Monday 00:00.
+		
+		Returns:
+			List of (ETB, ETD) tuples in hours from Monday 00:00.
+		"""
+		if not self.has_schedule_profile():
+			# Cannot calculate schedule without anchor EOSP
+			return []
+			
+		n_ports = self.number_of_port()
+		schedule = []
+		
+		# Initial EOSP in hours from Monday 00:00
+		anchor_wd = self.anchor_eosp_wd if self.anchor_eosp_wd is not None else 0.0
+		anchor_hr = self.anchor_eosp_hr if self.anchor_eosp_hr is not None else 0.0
+		current_eosp = anchor_wd * 24 + anchor_hr
+		
+		for i in range(n_ports):
+			port = self.get_port_by_idx(i)
+			
+			# Estimate components for ETB/ETD
+			# 1. Waiting time
+			t_wait = 0.0
+			if self._buffer_wait_times is not None and i < len(self._buffer_wait_times):
+				t_wait = self._buffer_wait_times[i]
+			elif hasattr(port, 'waiting_time') and isinstance(port.waiting_time, dict):
+				t_wait = np.mean(list(port.waiting_time.values())) if port.waiting_time else 2.0
+			else:
+				t_wait = 2.0 # Default fallback
+				
+			# 2. Maneuvering In
+			t_manin = getattr(port, 'maneuvering_time_in', 3.0)
+			
+			# 3. Stay Time
+			# We use a default stay time for the schedule anchor if not proforma
+			t_stay = 12.0 
+			
+			# Calculate ETB and ETD
+			etb = current_eosp + t_wait + t_manin
+			etd = etb + t_stay
+			
+			schedule.append((etb, etd))
+			
+			# Advance to next EOSP
+			if self.proforma_leg_durations is not None and i < len(self.proforma_leg_durations):
+				current_eosp += self.proforma_leg_durations[i]
+			else:
+				# Estimate leg duration for new/modified ports
+				t_manout = getattr(port, 'maneuvering_time_out', 3.0)
+				next_port = self.next_port_of_idx(i)
+				dist = portgraph.get_distance(port, next_port)
+				t_sail = dist / 14.0 # Use 14 kts as default proforma speed
+				current_eosp += (t_wait + t_manin + t_stay + t_manout + t_sail)
+				
+		return schedule
+
+	def _copy_metadata_to(self, target: 'ServiceLine'):
+		"""Internal helper to copy scheduling and operational metadata to a new line instance"""
+		target.anchor_eosp_wd = self.anchor_eosp_wd
+		target.anchor_eosp_hr = self.anchor_eosp_hr
+		target.frozen = self.frozen
+		target.frozen_speed = self.frozen_speed
+		target.frozen_weeks = self.frozen_weeks
+		target._buffer_ignore_lb = self._buffer_ignore_lb
+		# Note: buffer_wait_times and proforma_leg_durations are NOT copied 
+		# because they are sequence-dependent and length-specific.
+
 	def last_index_of_port(self, port: Port) -> int:
 		"""The last index of a port in a service line
 
@@ -507,7 +604,9 @@ class ServiceLine:
 		
 		if delta == 0:
 			# No change, return copy
-			return ServiceLine(self.name(), self.__line.copy(), _test=not validate, portgraph=portgraph)
+			new_line = ServiceLine(self.name(), self.__line.copy(), _test=not validate, portgraph=portgraph)
+			self._copy_metadata_to(new_line)
+			return new_line
 		
 		# Create new sequence
 		sequence = self.__line.copy()
@@ -520,6 +619,7 @@ class ServiceLine:
 		# Create and validate new service line
 		try:
 			new_line = ServiceLine(self.name(), sequence, _test=not validate, portgraph=portgraph)
+			self._copy_metadata_to(new_line)
 			if validate and not new_line.check_valid(warn=False, portgraph=portgraph):
 				raise ValueError(f"Shifting port at index {port_idx} by {delta} creates invalid service line")
 			return new_line
@@ -553,7 +653,9 @@ class ServiceLine:
 		
 		if idx1 == idx2:
 			# No change, return copy
-			return ServiceLine(self.name(), self.__line.copy(), _test=not validate, portgraph=portgraph)
+			new_line = ServiceLine(self.name(), self.__line.copy(), _test=not validate, portgraph=portgraph)
+			self._copy_metadata_to(new_line)
+			return new_line
 		
 		# Create new sequence with swapped ports
 		sequence = self.__line.copy()
@@ -562,6 +664,7 @@ class ServiceLine:
 		# Create and validate new service line
 		try:
 			new_line = ServiceLine(self.name(), sequence, _test=not validate, portgraph=portgraph)
+			self._copy_metadata_to(new_line)
 			if validate and not new_line.check_valid(warn=False, portgraph=portgraph):
 				raise ValueError(f"Swapping ports at indices {idx1} and {idx2} creates invalid service line")
 			return new_line
@@ -611,6 +714,7 @@ class ServiceLine:
 		
 		try:
 			new_line = ServiceLine(self.name(), sequence, _test=not validate, portgraph=portgraph)
+			self._copy_metadata_to(new_line)
 			if validate and not new_line.check_valid(warn=False, portgraph=portgraph):
 				raise ValueError(f"Reversing segment [{start_idx}, {end_idx}] creates invalid service line")
 			return new_line
@@ -635,7 +739,9 @@ class ServiceLine:
 		n = self.number_of_port()
 		
 		if n == 0:
-			return ServiceLine(self.name(), self.__line.copy(), _test=not validate, portgraph=portgraph)
+			new_line = ServiceLine(self.name(), self.__line.copy(), _test=not validate, portgraph=portgraph)
+			self._copy_metadata_to(new_line)
+			return new_line
 		
 		# Normalize steps to be within [0, n)
 		steps = steps % n
@@ -645,6 +751,7 @@ class ServiceLine:
 		
 		try:
 			new_line = ServiceLine(self.name(), sequence, _test=not validate, portgraph=portgraph)
+			self._copy_metadata_to(new_line)
 			if validate and not new_line.check_valid(warn=False, portgraph=portgraph):
 				raise ValueError(f"Rotating by {steps} steps creates invalid service line")
 			return new_line
@@ -676,6 +783,7 @@ class ServiceLine:
 		
 		try:
 			new_line = ServiceLine(self.name(), sequence, _test=not validate, portgraph=portgraph)
+			self._copy_metadata_to(new_line)
 			if validate and not new_line.check_valid(warn=False, portgraph=portgraph):
 				raise ValueError(f"Inserting port {port.get_id()} at position {position} creates invalid service line")
 			return new_line
@@ -706,6 +814,7 @@ class ServiceLine:
 		
 		try:
 			new_line = ServiceLine(self.name(), sequence, _test=not validate, portgraph=portgraph)
+			self._copy_metadata_to(new_line)
 			if validate and not new_line.check_valid(warn=False, portgraph=portgraph):
 				raise ValueError(f"Removing port {removed_port.get_id()} at position {position} creates invalid service line")
 			return new_line
@@ -998,7 +1107,18 @@ class ServiceLine:
 			else: # idx == len(sequence) - 1
 				if p == sequence[0]:
 					sequence.pop(idx)
-		return ServiceLine(self.name(), sequence, _test, portgraph=portgraph)
+		
+		new_line = ServiceLine(self.name(), sequence, _test, portgraph=portgraph)
+		
+		# Preserve anchor EOSP and buffer/schedule flags where applicable
+		new_line.anchor_eosp_wd = self.anchor_eosp_wd
+		new_line.anchor_eosp_hr = self.anchor_eosp_hr
+		new_line.frozen = self.frozen
+		new_line.frozen_speed = self.frozen_speed
+		new_line.frozen_weeks = self.frozen_weeks
+		new_line._buffer_ignore_lb = self._buffer_ignore_lb
+		
+		return new_line
 
 def create_service_line(
 		name: str, port_ids: list[str], portpool: PortPool, portgraph: PortGraph | None = None

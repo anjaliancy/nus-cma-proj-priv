@@ -1060,6 +1060,9 @@ class ServiceGraph:
 		if tuneparams.get('turnon-transit_time_penalty', 1) > 0.5:
 			transit_penalty_mult = tuneparams.get('ctrparam-transit_penalty_multiplier', 1000.0)  # USD per TEU-day of tardiness
 			
+			# Pre-calculate schedules for all lines to speed up lookup
+			line_schedules = [line.get_schedule(portgraph) for line in self.__lines_list]
+
 			for demand_vars_od, od, od_paths in zip(demand_vars, od_pairs, od_pair_paths):
 				expected_transit = portgraph.get_transit_time_by_idx(od[0], od[1])
 				
@@ -1093,12 +1096,48 @@ class ServiceGraph:
 						if not path_valid:
 							continue
 						
-						# 2. Transshipment time at hubs
-						hubs = path.get_hubs()
-						transship_time = float(len(hubs))  # 1 day per hub
+						# 2. Transshipment wait time at hubs (24h window constraint)
+						transship_wait_days = 0.0
+						path_slots = path.tolist_slot()
+						for i in range(len(path_slots) - 1):
+							slot_out = path_slots[i]
+							slot_in = path_slots[i+1]
+							
+							if slot_out.get_service() != slot_in.get_service():
+								# Transshipment at hub port
+								line_out = slot_out.get_service()
+								line_in = slot_in.get_service()
+								idx_line_out = self.__lines_list.index(line_out)
+								idx_line_in = self.__lines_list.index(line_in)
+								
+								sched_out = line_schedules[idx_line_out]
+								sched_in = line_schedules[idx_line_in]
+								
+								if sched_out and sched_in:
+									# Find the specific port call index in the rotation for these slots
+									# (Handles lines that visit the same port multiple times)
+									idx_call_out = line_out.get_segment_idx(slot_out.get_segment())
+									idx_call_in = line_in.get_segment_idx(slot_in.get_segment())
+									
+									if idx_call_out != -1 and idx_call_in != -1:
+										# ETD of unloading line (Departure from hub)
+										etd_unloading = sched_out[idx_call_out][1]
+										# ETB of loading line (Berth at hub)
+										etb_loading = sched_in[idx_call_in][0]
+										
+										wait_hrs = (etb_loading - etd_unloading) % 168.0
+										# The Constraint: At least 1 day (24h) difference
+										if wait_hrs < 24.0:
+											wait_hrs += 168.0
+										
+										transship_wait_days += (wait_hrs / 24.0)
+									else:
+										transship_wait_days += 1.0 # Default 1 day if lookup fails
+								else:
+									transship_wait_days += 1.0 # Default 1 day if schedule missing
 						
 						# Total estimated transit time
-						estimated_transit = path_sailing_time + transship_time
+						estimated_transit = path_sailing_time + transship_wait_days
 						
 						# Penalty for tardiness: max(0, actual - expected) * flow * penalty_rate
 						# Additional validation to prevent NaN/Inf

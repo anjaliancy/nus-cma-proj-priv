@@ -531,6 +531,19 @@ def read_cnc_proforma_data(portpool: PortPool, vesselpool: VesselPool) -> dict:
 			if hasattr(line, 'set_buffer_profile'):
 				line.set_buffer_profile(waiting_times, speeds_to_next, ignore_lb_flag)
 			
+			# Attach schedule-related profile (Anchor EOSP and Leg Durations)
+			# Leg Duration = Wait + ManIn + Stay + ManOut + TimeToNext
+			leg_durations = [
+				d['waiting_time'] + d['maneuvering_in'] + d['stay_time'] + 
+				d['maneuvering_out'] + d['time_to_next'] 
+				for d in metadata[line_name]['port_details']
+			]
+			anchor_wd = first_row['eosp_utc_wd']
+			anchor_hr = first_row['eosp_utc_hr']
+			
+			if hasattr(line, 'set_schedule_profile'):
+				line.set_schedule_profile(anchor_wd, anchor_hr, leg_durations)
+			
 		except Exception as e:
 			# Some ports might not be in portpool, skip those lines
 			# some lines are not valid
