@@ -540,9 +540,11 @@ def read_cnc_proforma_data(portpool: PortPool, vesselpool: VesselPool) -> dict:
 			]
 			anchor_wd = first_row['eosp_utc_wd']
 			anchor_hr = first_row['eosp_utc_hr']
+			v_rank = int(first_row['vrank'])
 			
 			if hasattr(line, 'set_schedule_profile'):
 				line.set_schedule_profile(anchor_wd, anchor_hr, leg_durations)
+			line.vessel_rank = v_rank
 			
 		except Exception as e:
 			# Some ports might not be in portpool, skip those lines

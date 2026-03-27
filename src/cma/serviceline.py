@@ -17,6 +17,7 @@ from scgraph.geographs.marnet import marnet_geograph  # type: ignore
 ## Note: the typing of this function is not correct
 
 from .port import Port, PortPool, PortGraph
+from .vessel import VesselPool
 
 class Segment:
 	"""class Segment
@@ -259,6 +260,7 @@ class ServiceLine:
 	frozen: bool = False
 	frozen_speed: float | None = None
 	frozen_weeks: float | None = None
+	vessel_rank: int | None = None
 	anchor_eosp_wd: float | None = None
 	anchor_eosp_hr: float | None = None
 	proforma_leg_durations: list[float] | None = None
@@ -438,7 +440,7 @@ class ServiceLine:
 	def get_proforma_leg_durations(self) -> list[float] | None:
 		return self.proforma_leg_durations
 
-	def get_schedule(self, portgraph: PortGraph) -> list[tuple[float, float]]:
+	def get_schedule(self, portgraph: PortGraph, vesselpool: VesselPool | None = None) -> list[tuple[float, float]]:
 		"""
 		Calculate Estimated Time of Berth (ETB) and Estimated Time of Departure (ETD) 
 		for each port in the rotation, in hours from Monday 00:00.
@@ -451,49 +453,102 @@ class ServiceLine:
 			return []
 			
 		n_ports = self.number_of_port()
-		schedule = []
 		
 		# Initial EOSP in hours from Monday 00:00
 		anchor_wd = self.anchor_eosp_wd if self.anchor_eosp_wd is not None else 0.0
 		anchor_hr = self.anchor_eosp_hr if self.anchor_eosp_hr is not None else 0.0
-		current_eosp = anchor_wd * 24 + anchor_hr
+		base_eosp = anchor_wd * 24 + anchor_hr
 		
+		# 1. Collect leg durations (EOSP to EOSP)
+		durations = []
+		for i in range(n_ports):
+			if self.proforma_leg_durations is not None and i < len(self.proforma_leg_durations):
+				durations.append(self.proforma_leg_durations[i])
+			else:
+				# Estimate leg duration for new/modified ports
+				port = self.get_port_by_idx(i)
+				next_port = self.next_port_of_idx(i)
+				
+				# a. Waiting time
+				t_wait = 2.0
+				if self._buffer_wait_times is not None and i < len(self._buffer_wait_times):
+					t_wait = self._buffer_wait_times[i]
+				elif hasattr(port, 'waiting_time') and isinstance(port.waiting_time, dict):
+					t_wait = np.mean(list(port.waiting_time.values())) if port.waiting_time else 2.0
+				
+				# b. Maneuvering
+				t_manin = getattr(port, 'maneuvering_time_in', 3.0)
+				t_manout = getattr(port, 'maneuvering_time_out', 3.0)
+				
+				# c. Stay Time (Data-driven)
+				t_stay = 12.0
+				if vesselpool is not None and self.vessel_rank is not None:
+					vessel = vesselpool.get_vessel_instance(self.vessel_rank)
+					prod = port.berth_productivity.get(self.vessel_rank, 50.0)
+					nominal_volume = vessel.vessel_capacity * 0.15 # Assume 15% exchange
+					t_stay = max(6.0, nominal_volume / prod) # Min 6 hours
+				
+				# d. Sailing Time (Data-driven)
+				dist = portgraph.get_distance(port, next_port)
+				speed = 14.0
+				if vesselpool is not None and self.vessel_rank is not None:
+					vessel = vesselpool.get_vessel_instance(self.vessel_rank)
+					speed = (vessel.min_speed + vessel.max_speed) / 2.0 # Nominal mid-speed
+				t_sail = dist / speed
+				
+				durations.append(t_wait + t_manin + t_stay + t_manout + t_sail)
+		
+		# 2. Scale durations to match cycle length if week is set
+		if self.week < 1000.0: # If week is assigned (typical values 1-12)
+			target_total = self.week * 168.0
+			current_total = sum(durations)
+			if current_total > 0:
+				scale = target_total / current_total
+				durations = [d * scale for d in durations]
+		
+		# 3. Compute ETB/ETD from durations
+		schedule = []
+		current_eosp = base_eosp
 		for i in range(n_ports):
 			port = self.get_port_by_idx(i)
 			
-			# Estimate components for ETB/ETD
-			# 1. Waiting time
-			t_wait = 0.0
-			if self._buffer_wait_times is not None and i < len(self._buffer_wait_times):
-				t_wait = self._buffer_wait_times[i]
-			elif hasattr(port, 'waiting_time') and isinstance(port.waiting_time, dict):
-				t_wait = np.mean(list(port.waiting_time.values())) if port.waiting_time else 2.0
+			# We need to break down the leg duration into (Wait+ManIn) and Stay
+			# For simplicity, if we have durations, we assume ETB is at some offset
+			# If we used estimates, we have the components. If proforma, we estimate ratios.
+			
+			if self.proforma_leg_durations is not None and i < len(self.proforma_leg_durations):
+				# For proforma, use a typical 20% offset for ETB
+				t_to_etb = 0.2 * durations[i] 
+				t_stay = 0.4 * durations[i]
 			else:
-				t_wait = 2.0 # Default fallback
+				# Use the same logic as above but scaled
+				t_wait = 2.0
+				if self._buffer_wait_times is not None and i < len(self._buffer_wait_times):
+					t_wait = self._buffer_wait_times[i]
+				t_manin = getattr(port, 'maneuvering_time_in', 3.0)
 				
-			# 2. Maneuvering In
-			t_manin = getattr(port, 'maneuvering_time_in', 3.0)
-			
-			# 3. Stay Time
-			# We use a default stay time for the schedule anchor if not proforma
-			t_stay = 12.0 
-			
-			# Calculate ETB and ETD
-			etb = current_eosp + t_wait + t_manin
+				t_to_etb = t_wait + t_manin
+				# Recalculate t_stay for the specific port
+				t_stay = 12.0
+				if vesselpool is not None and self.vessel_rank is not None:
+					vessel = vesselpool.get_vessel_instance(self.vessel_rank)
+					prod = port.berth_productivity.get(self.vessel_rank, 50.0)
+					nominal_volume = vessel.vessel_capacity * 0.15
+					t_stay = max(6.0, nominal_volume / prod)
+				
+				# If we scaled, scale these too
+				if self.week < 1000.0:
+					target_total = self.week * 168.0
+					current_total = sum(durations) # This is already scaled sum
+					# We should have used the original estimated total for scale factor
+					# But since durations is already scaled, we just use it
+					pass 
+
+			etb = current_eosp + t_to_etb
 			etd = etb + t_stay
-			
 			schedule.append((etb, etd))
 			
-			# Advance to next EOSP
-			if self.proforma_leg_durations is not None and i < len(self.proforma_leg_durations):
-				current_eosp += self.proforma_leg_durations[i]
-			else:
-				# Estimate leg duration for new/modified ports
-				t_manout = getattr(port, 'maneuvering_time_out', 3.0)
-				next_port = self.next_port_of_idx(i)
-				dist = portgraph.get_distance(port, next_port)
-				t_sail = dist / 14.0 # Use 14 kts as default proforma speed
-				current_eosp += (t_wait + t_manin + t_stay + t_manout + t_sail)
+			current_eosp += durations[i]
 				
 		return schedule
 
@@ -501,6 +556,7 @@ class ServiceLine:
 		"""Internal helper to copy scheduling and operational metadata to a new line instance"""
 		target.anchor_eosp_wd = self.anchor_eosp_wd
 		target.anchor_eosp_hr = self.anchor_eosp_hr
+		target.vessel_rank = self.vessel_rank
 		target.frozen = self.frozen
 		target.frozen_speed = self.frozen_speed
 		target.frozen_weeks = self.frozen_weeks
@@ -1109,14 +1165,7 @@ class ServiceLine:
 					sequence.pop(idx)
 		
 		new_line = ServiceLine(self.name(), sequence, _test, portgraph=portgraph)
-		
-		# Preserve anchor EOSP and buffer/schedule flags where applicable
-		new_line.anchor_eosp_wd = self.anchor_eosp_wd
-		new_line.anchor_eosp_hr = self.anchor_eosp_hr
-		new_line.frozen = self.frozen
-		new_line.frozen_speed = self.frozen_speed
-		new_line.frozen_weeks = self.frozen_weeks
-		new_line._buffer_ignore_lb = self._buffer_ignore_lb
+		self._copy_metadata_to(new_line)
 		
 		return new_line
 

@@ -838,8 +838,7 @@ class ServiceGraph:
 							matrix_stay_days[idx_line, idx_port] >= 
 							transshipments[idx_line, idx_port] / gross_prod / 24
 						)
-						# NEW: Minimum berthing time constraint (3 hours)
-						# Only apply if port is in the service line
+						# Minimum berthing time constraint (3 hours)
 						if line.has_port(port):
 							constraints.append(matrix_stay_days[idx_line, idx_port] >= 3.0 / 24.0)
 							
@@ -894,12 +893,15 @@ class ServiceGraph:
 			daily_bukering_cost_rates[:, cap_index:] *= penalty_mult
 		
 		list_saildays = []
+		
+		# Pre-calculate schedules for all lines (used for transit penalty and tethering)
+		line_schedules = [line.get_schedule(portgraph, vesselpool) for line in self.__lines_list]
+		schedule_buffer_days = tuneparams.get('schedule_buffer_hrs', 12.0) / 24.0
 
 		for idx_line, line in enumerate(self.__lines_list):
 			line_ship_vars = ship_vars[idx_line, :]   # shape = (rank,)
 			line_distance = line.get_distance(portgraph)
 			
-			# Robustness: Skip buffer constraint if distance is invalid (inf)
 			# Operations like inf - inf produce NaN, which crashes Gurobi.
 			is_distance_invalid = np.isinf(line_distance) or line_distance <= 0
 
@@ -910,6 +912,40 @@ class ServiceGraph:
 				line_port_stay_days = np.sum(matrix_stay_days[idx_line, :])
 			line_sailing_days = 7 * (week_vars[idx_line, :] @ week_levels) - line_port_stay_days
 			list_saildays.append(line_sailing_days)
+
+			# 3.5 Schedule Adherence (Tethering) Constraint
+			# Force MILP stay times and sailing speed to be compatible with proforma
+			if tuneparams.get('turnon-schedule_adherence', 1) > 0.5:
+				proforma = line_schedules[idx_line]
+				if proforma and not is_distance_invalid:
+					anchor_wd, anchor_hr = line.get_anchor_eosp()
+					if anchor_wd is not None and anchor_hr is not None:
+						base_eosp_days = (anchor_wd * 24 + anchor_hr) / 24.0
+						
+						total_dist = line.get_distance(portgraph)
+						cum_dist = 0
+						cum_stay_days = 0
+						
+						line_ports = line.tolist_port()
+						for k, port in enumerate(line_ports):
+							p_idx = portgraph.get_unique_index(port)
+							num_visits = line_ports.count(port)
+							
+							if k > 0:
+								prev_p = line_ports[k-1]
+								cum_dist += portgraph.get_distance(prev_p, port)
+							
+							# Accumulated time at ETB of port k (relative to line start)
+							# = (Dist_so_far / Total_Dist) * Total_Sailing_Days + Stay_Time_so_far
+							# Note: Stay_Time_so_far excludes current port's stay for ETB
+							etb_days_expr = base_eosp_days + (cum_dist / total_dist) * line_sailing_days + cum_stay_days
+							
+							proforma_etb_days = proforma[k][0] / 24.0
+							constraints.append(etb_days_expr <= proforma_etb_days + schedule_buffer_days)
+							
+							# Update cumulative stay for next port's ETB
+							# matrix_stay_days is in days
+							cum_stay_days += matrix_stay_days[idx_line, p_idx] / num_visits
 			buf = 0.5  # Fixed tolerance level
 
 			# Constraints for frozen lines
@@ -1060,9 +1096,6 @@ class ServiceGraph:
 		if tuneparams.get('turnon-transit_time_penalty', 1) > 0.5:
 			transit_penalty_mult = tuneparams.get('ctrparam-transit_penalty_multiplier', 1000.0)  # USD per TEU-day of tardiness
 			
-			# Pre-calculate schedules for all lines to speed up lookup
-			line_schedules = [line.get_schedule(portgraph) for line in self.__lines_list]
-
 			for demand_vars_od, od, od_paths in zip(demand_vars, od_pairs, od_pair_paths):
 				expected_transit = portgraph.get_transit_time_by_idx(od[0], od[1])
 				
