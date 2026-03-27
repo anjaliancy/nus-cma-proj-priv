@@ -1258,6 +1258,87 @@ class ServiceGraph:
 		#
 		#endregion
 
+		# 1. TEU Input and Fulfilled
+		total_teus_input = 0.0
+		total_teus_fulfilled = 0.0
+		for idx_od, (pair_od, demand_vars_od) in enumerate(zip(od_pairs, demand_vars)):
+			demand_od = portgraph.get_demand_by_idx(pair_od[0], pair_od[1])
+			total_teus_input += demand_od
+			fulfilled = sum(var.value for var in demand_vars_od if var.value is not None)
+			total_teus_fulfilled += fulfilled
+
+		# 2. TEUs Delayed and Avg Delay
+		total_teus_delayed = 0.0
+		total_delay_days_volume = 0.0
+
+		for demand_vars_od, od, od_paths in zip(demand_vars, od_pairs, od_pair_paths):
+			expected_transit = portgraph.get_transit_time_by_idx(od[0], od[1])
+			if expected_transit is not None and expected_transit > 0 and not np.isnan(expected_transit) and not np.isinf(expected_transit):
+				for idx_path, path in enumerate(od_paths):
+					x_val = demand_vars_od[idx_path].value
+					if x_val is None or x_val <= 1e-4:
+						continue
+						
+					path_sailing_time = 0.0
+					path_valid = True
+					for slot in path.tolist_slot():
+						slot_distance = slot.get_distance(portgraph)
+						if slot_distance is None or np.isnan(slot_distance) or np.isinf(slot_distance) or slot_distance <= 0:
+							path_valid = False
+							break
+						approx_speed_kts = 14.0
+						path_sailing_time += slot_distance / (24.0 * approx_speed_kts)
+					
+					if not path_valid:
+						continue
+						
+					transship_wait_days = 0.0
+					path_slots = path.tolist_slot()
+					for i in range(len(path_slots) - 1):
+						slot_out = path_slots[i]
+						slot_in = path_slots[i+1]
+						if slot_out.get_service() != slot_in.get_service():
+							line_out = slot_out.get_service()
+							line_in = slot_in.get_service()
+							idx_line_out = self.__lines_list.index(line_out)
+							idx_line_in = self.__lines_list.index(line_in)
+							sched_out = line_schedules[idx_line_out]
+							sched_in = line_schedules[idx_line_in]
+							if sched_out and sched_in:
+								idx_call_out = line_out.get_segment_idx(slot_out.get_segment())
+								idx_call_in = line_in.get_segment_idx(slot_in.get_segment())
+								if idx_call_out != -1 and idx_call_in != -1:
+									etd_unloading = sched_out[idx_call_out][1]
+									etb_loading = sched_in[idx_call_in][0]
+									wait_hrs = (etb_loading - etd_unloading) % 168.0
+									if wait_hrs < 24.0:
+										wait_hrs += 168.0
+									transship_wait_days += (wait_hrs / 24.0)
+								else:
+									transship_wait_days += 1.0
+							else:
+								transship_wait_days += 1.0
+					
+					estimated_transit = path_sailing_time + transship_wait_days
+					if estimated_transit > expected_transit:
+						tardiness = estimated_transit - expected_transit
+						total_teus_delayed += x_val
+						total_delay_days_volume += (tardiness * x_val)
+
+		avg_delay_days = (total_delay_days_volume / total_teus_delayed) if total_teus_delayed > 0 else 0.0
+
+		# 3. Buffer Violations
+		lines_buffer_above_30 = 0
+		lines_buffer_below_15 = 0
+		for idx_line in range(n_lines):
+			lb_viol = buffer_violation_lb[idx_line].value if hasattr(buffer_violation_lb[idx_line], 'value') else 0
+			ub_viol = buffer_violation_ub[idx_line].value if hasattr(buffer_violation_ub[idx_line], 'value') else 0
+			
+			if ub_viol is not None and ub_viol > 0.01:
+				lines_buffer_above_30 += 1
+			if lb_viol is not None and lb_viol > 0.01:
+				lines_buffer_below_15 += 1
+
 		return {
 			'total cost': typing.cast(float, prob.value),
 			'chartering cost': float(expr_chartering.value) if hasattr(expr_chartering, 'value') else float(expr_chartering),
@@ -1273,6 +1354,12 @@ class ServiceGraph:
 			'buffer violation lb': buffer_violation_lb,
 			'buffer violation ub': buffer_violation_ub,
 			'unfulfilled demand': eps_vars,
+			'kpi_teus_input': total_teus_input,
+			'kpi_teus_fulfilled': total_teus_fulfilled,
+			'kpi_teus_delayed': total_teus_delayed,
+			'kpi_avg_delay_days': avg_delay_days,
+			'kpi_lines_buffer_above_30': lines_buffer_above_30,
+			'kpi_lines_buffer_below_15': lines_buffer_below_15,
 		}
 
 	def fulfill_demands_2(self,
