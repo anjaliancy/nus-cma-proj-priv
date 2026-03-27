@@ -808,9 +808,11 @@ class ServiceGraph:
 		# region Objective
 		# 1. Weekly Chartering Cost
 		daily_charter_costs = vesselpool.get_chartering_costs()
-		obj_expr += 7 * cp.sum(ship_vars @ daily_charter_costs)
+		expr_chartering = 7 * cp.sum(ship_vars @ daily_charter_costs)
+		obj_expr += expr_chartering
 
 		# 2. Weekly Transshipment Cost
+		expr_transshipment = 0
 		# 1) transshipment cost per hour for each port
 		ports_costs_transsip = [port.cost_transship for port in portgraph.tolist_port()]
 		# 2) hour productivity of each port
@@ -847,7 +849,8 @@ class ServiceGraph:
 						constraints.append(matrix_stay_days[idx_line, idx_port] == 0)
 			
 			for idx_line in range(n_lines):
-				obj_expr += cp.sum(matrix_stay_days[idx_line, :] * ports_costs_transsip)
+				expr_transshipment += cp.sum(matrix_stay_days[idx_line, :] * ports_costs_transsip)
+			obj_expr += expr_transshipment
 		else:
 			# Legacy mode: direct calculation (circular definition)
 			matrix_stay_days = np.array([[0 for _ in portgraph.tolist_port()]for _ in self.__lines_list], dtype=object)
@@ -866,7 +869,8 @@ class ServiceGraph:
 						# Zero productivity: no port operations possible
 						stay_days_per_port.append(0)
 				matrix_stay_days[idx_line, :] = stay_days_per_port
-				obj_expr += matrix_stay_days[idx_line, :] @ ports_costs_transsip
+				expr_transshipment += matrix_stay_days[idx_line, :] @ ports_costs_transsip
+			obj_expr += expr_transshipment
 
 		# Big M's method for transshipment ship class restriction
 		for idx_line in range(n_lines):
@@ -879,6 +883,7 @@ class ServiceGraph:
 					constraints.append(cp.sum(ship_vars[idx_line, : (idf + 1)]) >= z)
 
 		# 3. Weekly Bukering Cost
+		expr_bunkering = 0
 		daily_bukering_cost_rates, speed_level0 = vesselpool.get_bukering_costs()  # shape = (rank, speed)
 		KTS_levels = vesselpool.get_speed_levels()
 		n_speed_level = len(KTS_levels)
@@ -955,7 +960,7 @@ class ServiceGraph:
 					constraints.append(line_sailing_days * 24 * line.frozen_speed == line_distance)
 
 			if tuneparams['turnon-vessel_speed_optimization'] > 1/2:
-				obj_expr += 7 * line_ship_vars @ vesselpool.get_bukering_cost_middle()
+				expr_bunkering += 7 * line_ship_vars @ vesselpool.get_bukering_cost_middle()
 				
 				if not is_distance_invalid:
 					# Constraint: KTS_min <= Speed (distance / sailing days) <= KTS_max
@@ -998,7 +1003,7 @@ class ServiceGraph:
 				# Auxiliary Variable:
 				#     W_{r,k} = line_ship_vars_{r} * KTS_vars_{k}
 				aux_W_shipspeed = cp.Variable(shape=daily_bukering_cost_rates.shape)  # shape = (rank, speed)
-				obj_expr += 7 * cp.multiply(aux_W_shipspeed, daily_bukering_cost_rates).sum()
+				expr_bunkering += 7 * cp.multiply(aux_W_shipspeed, daily_bukering_cost_rates).sum()
 
 				# Binary variable for speed
 				#     KTS_vars_{k}
@@ -1072,10 +1077,13 @@ class ServiceGraph:
 					constraints.append(buffer_violation_lb[idx_line] == 0)
 					constraints.append(buffer_violation_ub[idx_line] == 0)
 
+		obj_expr += expr_bunkering
+
 		# 4. Weekly Port Call Cost
+		expr_portcall = 0
 		for idx_line, line in enumerate(self.__lines_list):
 			aux_portcall_weeks = cp.Variable(shape=len(week_levels))
-			obj_expr += aux_portcall_weeks @ [1 / k for k in week_levels]
+			expr_portcall += aux_portcall_weeks @ [1 / k for k in week_levels]
 
 			# express `aux_portcall_weeks := line_portcall_cost * line_weeks`
 			line_weeks = week_vars[idx_line]     # binaries, one-hot
@@ -1090,6 +1098,8 @@ class ServiceGraph:
 			constraints.append(aux_portcall_weeks >= -bigM_portcall * line_weeks)
 			constraints.append(aux_portcall_weeks <= line_portcall_cost + bigM_portcall * (1 - line_weeks))
 			constraints.append(aux_portcall_weeks >= line_portcall_cost - bigM_portcall * (1 - line_weeks))
+		
+		obj_expr += expr_portcall
 		
 		# 5. Transit Time Penalty
 		# Penalize paths that exceed expected transit time (cargo value depreciation)
@@ -1250,6 +1260,10 @@ class ServiceGraph:
 
 		return {
 			'total cost': typing.cast(float, prob.value),
+			'chartering cost': float(expr_chartering.value) if hasattr(expr_chartering, 'value') else float(expr_chartering),
+			'transshipment cost': float(expr_transshipment.value) if hasattr(expr_transshipment, 'value') else float(expr_transshipment),
+			'bunkering cost': float(expr_bunkering.value) if hasattr(expr_bunkering, 'value') else float(expr_bunkering),
+			'portcall cost': float(expr_portcall.value) if hasattr(expr_portcall, 'value') else float(expr_portcall),
 			'demand routes': demand_vars,
 			'line flows': flow_vars,
 			'weeks': week_vars,
