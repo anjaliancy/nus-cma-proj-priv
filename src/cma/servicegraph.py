@@ -814,13 +814,18 @@ class ServiceGraph:
 		# 2. Weekly Transshipment Cost
 		expr_transshipment = 0
 		# 1) transshipment cost per hour for each port
-		ports_costs_transsip = [port.cost_transship for port in portgraph.tolist_port()]
+		ports_list = portgraph.tolist_port()
+		ports_costs_transsip = [port.cost_transship for port in ports_list]
 		# 2) hour productivity of each port
-		ports_prods = [port.get_producticity(vesselpool) for port in portgraph.tolist_port()]
+		ports_prods = [port.get_producticity(vesselpool) for port in ports_list]
 		ports_gross_prod = [sum(prods) for prods in ports_prods]
 		# 3) suitable type of vessel for each port
 		ports_suitable_v = [np.argmax(prods) for prods in ports_prods]
 		# 4) Port staying days per week for each line (row) and each port (column)
+		port_call_counts = np.array([
+			[line.count_port_calls(port) for port in ports_list]
+			for line in self.__lines_list
+		], dtype=float)
 		
 		if tuneparams.get('turnon-port_operations_constraint', 1) > 0.5:
 			# Port stay days as decision variable with lower bound constraint
@@ -833,6 +838,7 @@ class ServiceGraph:
 				for idx_port in range(portgraph.get_number_of_ports()):
 					port = portgraph.get_port_by_idx(idx_port)
 					gross_prod = ports_gross_prod[idx_port]
+					min_berthing_days = port_call_counts[idx_line, idx_port] * (3.0 / 24.0)
 					
 					if gross_prod > 0:
 						# Stay_days >= Transshipment_volume / (Productivity * 24)
@@ -841,35 +847,33 @@ class ServiceGraph:
 							transshipments[idx_line, idx_port] / gross_prod / 24
 						)
 						# Minimum berthing time constraint (3 hours)
-						if line.has_port(port):
-							constraints.append(matrix_stay_days[idx_line, idx_port] >= 3.0 / 24.0)
+						if min_berthing_days > 0:
+							constraints.append(matrix_stay_days[idx_line, idx_port] >= min_berthing_days)
 							
 					else:
 						# No productivity means no operations allowed
 						constraints.append(matrix_stay_days[idx_line, idx_port] == 0)
 			
 			for idx_line in range(n_lines):
-				expr_transshipment += cp.sum(matrix_stay_days[idx_line, :] * ports_costs_transsip)
+				expr_transshipment += 24 * cp.sum(matrix_stay_days[idx_line, :] * ports_costs_transsip)
 			obj_expr += expr_transshipment
 		else:
 			# Legacy mode: direct calculation (circular definition)
-			matrix_stay_days = np.array([[0 for _ in portgraph.tolist_port()]for _ in self.__lines_list], dtype=object)
+			matrix_stay_days = np.array([[0 for _ in ports_list]for _ in self.__lines_list], dtype=object)
 			for idx_line in range(n_lines):
-				line = self.__lines_list[idx_line]
 				stay_days_per_port = []
 				for idx_port, gross_prod in enumerate(ports_gross_prod):
-					port = portgraph.get_port_by_idx(idx_port)
+					min_berthing_days = port_call_counts[idx_line, idx_port] * (3.0 / 24.0)
 					if gross_prod > 0:
 						val = transshipments[idx_line, idx_port] / gross_prod / 24
 						# NEW: Minimum berthing time constraint (3 hours)
-						if line.has_port(port):
-							val = max(val, 3.0 / 24.0)
+						val = max(val, min_berthing_days)
 						stay_days_per_port.append(val)
 					else:
 						# Zero productivity: no port operations possible
 						stay_days_per_port.append(0)
 				matrix_stay_days[idx_line, :] = stay_days_per_port
-				expr_transshipment += matrix_stay_days[idx_line, :] @ ports_costs_transsip
+				expr_transshipment += 24 * (matrix_stay_days[idx_line, :] @ ports_costs_transsip)
 			obj_expr += expr_transshipment
 
 		# Big M's method for transshipment ship class restriction
@@ -1489,23 +1493,30 @@ class ServiceGraph:
 
 		# 2. Weekly Transshipment Cost
 		# 1) transshipment cost per hour for each port
-		ports_costs_transsip = [port.cost_transship for port in portgraph.tolist_port()]
+		ports_list = portgraph.tolist_port()
+		ports_costs_transsip = [port.cost_transship for port in ports_list]
 		# 2) hour productivity of each port
-		ports_prods = [port.get_producticity(vesselpool) for port in portgraph.tolist_port()]
+		ports_prods = [port.get_producticity(vesselpool) for port in ports_list]
 		ports_gross_prod = [sum(prods) for prods in ports_prods]
 		# 3) Port staying days per week for each line (row) and each port (rolumn)
-		matrix_stay_days = np.array([[0 for _ in portgraph.tolist_port()] for _ in self.__lines_list], dtype=object)
+		matrix_stay_days = np.array([[0 for _ in ports_list] for _ in self.__lines_list], dtype=object)
+		port_call_counts = np.array([
+			[line.count_port_calls(port) for port in ports_list]
+			for line in self.__lines_list
+		], dtype=float)
 
 		for idx_line in range(n_lines):
 			stay_days_per_port = []
 			for idx_port, gross_prod in enumerate(ports_gross_prod):
 				if gross_prod > 0:
-					stay_days_per_port.append(transshipments[idx_line, idx_port] / gross_prod / 24)
+					stay_days = transshipments[idx_line, idx_port] / gross_prod / 24
+					stay_days = max(stay_days, port_call_counts[idx_line, idx_port] * (3.0 / 24.0))
+					stay_days_per_port.append(stay_days)
 				else:
 					# Zero productivity: no port operations possible
 					stay_days_per_port.append(0)
 			matrix_stay_days[idx_line, :] = stay_days_per_port
-			obj_expr += matrix_stay_days[idx_line, :] @ ports_costs_transsip
+			obj_expr += 24 * (matrix_stay_days[idx_line, :] @ ports_costs_transsip)
 
 		# 3. Weekly Bunkering Cost
 		list_saildays = []
@@ -1732,16 +1743,29 @@ class ServiceGraph:
 		# 2. Weekly Transshipment Cost
 		total_transshipment_cost = 0
 		# 1) transshipment cost per hour for each port
-		ports_costs_transsip = [port.cost_transship for port in portgraph.tolist_port()]
+		ports_list = portgraph.tolist_port()
+		ports_costs_transsip = [port.cost_transship for port in ports_list]
 		# 2) hour productivity of each port
-		ports_prods = [port.get_producticity(vesselpool) for port in portgraph.tolist_port()]
+		ports_prods = [port.get_producticity(vesselpool) for port in ports_list]
 		ports_gross_prod = [sum(prods) for prods in ports_prods]
 		# 3) Port staying days per week for each line (row) and each port (column)
-		matrix_stay_days = np.array([[0 for _ in portgraph.tolist_port()] for _ in self.__lines_list], dtype=object)
+		matrix_stay_days = np.array([[0 for _ in ports_list] for _ in self.__lines_list], dtype=object)
+		port_call_counts = np.array([
+			[line.count_port_calls(port) for port in ports_list]
+			for line in self.__lines_list
+		], dtype=float)
 
 		for idx_line in range(n_lines):
-			matrix_stay_days[idx_line, :] = transshipments[idx_line, :] / ports_gross_prod / 24
-			total_transshipment_cost += transshipments[idx_line, :] @ ports_costs_transsip
+			stay_days_per_port = []
+			for idx_port, gross_prod in enumerate(ports_gross_prod):
+				if gross_prod > 0:
+					stay_days = transshipments[idx_line, idx_port] / gross_prod / 24
+					stay_days = max(stay_days, port_call_counts[idx_line, idx_port] * (3.0 / 24.0))
+					stay_days_per_port.append(stay_days)
+				else:
+					stay_days_per_port.append(0)
+			matrix_stay_days[idx_line, :] = stay_days_per_port
+			total_transshipment_cost += 24 * (matrix_stay_days[idx_line, :] @ ports_costs_transsip)
 		obj_expr -= total_transshipment_cost
 
 		# 3. Weekly Bunkering Cost

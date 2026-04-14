@@ -224,7 +224,7 @@ class TestTransshipmentCost(unittest.TestCase):
         self.vesselpool = read_vessel_class_data()
     
     def test_transshipment_cost_calculation(self):
-        """Test transshipment cost formula: (volume / productivity) × rate"""
+        """Test transshipment cost formula: weekly stay hours × hourly rate"""
         ports = self.portpool.tolist_port()
         
         # Find a port with productivity data
@@ -238,16 +238,18 @@ class TestTransshipmentCost(unittest.TestCase):
                     # Example: 1000 TEU transshipment
                     volume = 1000
                     
-                    # Time in hours
+                    # Weekly stay time implied by weekly TEU flow
                     time_hours = volume / gross_prod
+                    stay_days = time_hours / 24
                     
                     # Should be positive and finite
                     self.assertGreater(time_hours, 0)
+                    self.assertGreater(stay_days, 0)
                     self.assertTrue(np.isfinite(time_hours))
                     
-                    # Cost = time × hourly_rate (e.g., $100/hour)
+                    # Cost = stay_days × 24 × hourly_rate
                     hourly_rate = 100
-                    cost = time_hours * hourly_rate
+                    cost = stay_days * 24 * hourly_rate
                     
                     self.assertGreater(cost, 0)
                     break
@@ -335,8 +337,8 @@ class TestObjectiveFunctionIntegration(unittest.TestCase):
         port = ports[0]
         prod = port.get_producticity(self.vesselpool)
         if prod and sum(prod) > 0:
-            transship_time = 1000 / sum(prod)
-            transship_cost = transship_time * 100
+            transship_stay_days = 1000 / sum(prod) / 24
+            transship_cost = transship_stay_days * 24 * 100
         else:
             transship_cost = 0
         

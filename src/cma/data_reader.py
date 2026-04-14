@@ -14,6 +14,26 @@ import numpy as np
 BUNKER_PRICE = 579.0  # USD per metric ton (default from legacy data)
 DEFAULT_VESSEL_DRAFT = 15.0  # meters (default when not specified)
 
+ALLOWED_TRANSSHIP_PORT_IDS: set[str] = {
+	'CNNGB',
+	'CNNSA',
+	'CNSHA',
+	'CNSHK',
+	'CNTAO',
+	'CNXMN',
+	'CNYTN',
+	'HKHKG',
+	'IDJKT',
+	'JPYOK',
+	'KRKAN',
+	'KRPUS',
+	'MYPKG',
+	'PHDVO',
+	'SGSIN',
+	'TWKHH',
+	'VNVUT',
+}
+
 data_file_vessel = "input/Vessel_Nominal.csv"
 data_file_port = "input/Port_Dataset.csv"
 data_file_port_call = "data_2024-12-23/PORT_CALL_Details_Dataset.xlsx"
@@ -138,13 +158,14 @@ def read_port_data() -> Tuple[PortPool, PortPool]:
 		if port_id not in apac_port_ids:
 			continue
 
-		# Handle dummy values
+		# Keep raw costs as provided by the dataset. (We no longer infer hub-eligibility
+		# from cost placeholders; hub ports are explicitly controlled by
+		# `ALLOWED_TRANSSHIP_PORT_IDS`.)
 		transshipment_cost = row['TranshipmentCost']
-		if transshipment_cost == 5000:
-			transshipment_cost = 0
 		storage_cost = row['StorageCost']
 		if storage_cost == 1000000:
 			storage_cost = 0
+		transshipment_capacity = (port_id in ALLOWED_TRANSSHIP_PORT_IDS)
 		
 		port_pool.add_port(
 			row['PortID'],
@@ -156,7 +177,7 @@ def read_port_data() -> Tuple[PortPool, PortPool]:
 			{},  # port call cost - filled later
 			transshipment_cost,
 			storage_cost,
-			row['TranshipmentCapacity'],
+			transshipment_capacity,
 			row['MaxDraft'],
 			row['MaxDailyPortCall']
 		)

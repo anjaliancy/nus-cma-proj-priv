@@ -163,15 +163,15 @@ class TestPortStayDaysInObjective(unittest.TestCase):
         self.portgraph = read_sailing_distance_data(self.portpool)
     
     def test_stay_days_affect_transshipment_cost(self):
-        """Test that transshipment cost = stay_days * transship_cost_rate"""
-        # Transshipment cost should be stay_days * hourly_rate
+        """Test that transshipment cost = stay_days * 24 * hourly rate"""
+        # Transshipment cost should be stay_days * 24 * hourly_rate
         # stay_days is from constraint, hourly_rate from port data
         
         stay_days = 1.0
         hourly_cost_rate = 50.0  # USD/hour
-        expected_weekly_cost = stay_days * hourly_cost_rate
+        expected_weekly_cost = stay_days * 24 * hourly_cost_rate
         
-        self.assertAlmostEqual(expected_weekly_cost, 50.0, places=2,
+        self.assertAlmostEqual(expected_weekly_cost, 1200.0, places=2,
                               msg="Transshipment cost calculation")
     
     def test_stay_days_reduce_sailing_days(self):
@@ -294,6 +294,19 @@ class TestConstraintFormulation(unittest.TestCase):
         
         self.assertEqual(expected_constraints, 30,
                         "Constraint count for 3 lines, 10 ports")
+
+    def test_minimum_berthing_time_applies_per_port_call(self):
+        """Test that repeated port calls accumulate 3-hour minimums."""
+        ports = [Port('P1', 'P1', 0, 0, {}, {}, {}, 50, 0, True, 10, 10)]
+        repeated_line = ServiceLine('LoopLine', [ports[0], ports[0], ports[0]], _test=True)
+
+        self.assertEqual(repeated_line.count_port_calls(ports[0]), 3)
+        self.assertAlmostEqual(
+            repeated_line.count_port_calls(ports[0]) * (3.0 / 24.0),
+            3 * (3.0 / 24.0),
+            places=6,
+            msg="Minimum berthing time should scale with actual call count",
+        )
     
     def test_decision_variable_nonnegative(self):
         """Test that stay_days decision variable is non-negative"""

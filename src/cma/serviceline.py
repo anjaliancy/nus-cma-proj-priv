@@ -960,6 +960,10 @@ class ServiceLine:
 	def has_port_by_id(self, port_id: str, port_pool: PortPool) -> bool:
 		return self.has_port(port_pool.get_port(port_id))
 
+	def count_port_calls(self, port: Port) -> int:
+		"""Return how many times the line calls at the given port."""
+		return sum(1 for line_port in self.__line if line_port == port)
+
 	def are_ports_connected(self, port_i: Port, port_j: Port) -> bool:
 		if port_i == port_j:
 			raise ValueError('Same Ports')

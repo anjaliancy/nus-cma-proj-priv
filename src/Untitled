@@ -1,6 +1,0 @@
-    'BigM-portcall_cost': 1e7,          # Tightened from 2e9 for better stability
-    'solver-MIPGap': 0.05,              # 5% gap (returns "good enough" results much faster)
-    'solver-TimeLimit': 3600,           # Hard limit of 1 hour
-    'solver-MIPFocus': 1,               # Focus on finding feasible solutions quickly
-    'solver-verbose': True              # Show Gurobi's progress logs
-}
