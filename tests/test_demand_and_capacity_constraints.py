@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 from cma.data_reader import read_port_data, read_vessel_class_data, read_demand_with_transit_time
 from cma.port import PortGraph
+from cma.servicegraph import _derive_weekly_average_capacity_upper_bounds, _is_integral_week_level
 
 
 class TestDemandData(unittest.TestCase):
@@ -258,6 +259,36 @@ class TestCapacityConstraintFormulation(unittest.TestCase):
         # Weekly service
         weekly_capacity_1week = line_capacity / 1
         self.assertEqual(weekly_capacity_1week, 4000)
+
+
+class TestTightLineCapacityBounds(unittest.TestCase):
+    """Test the tighter line-capacity linearization helpers."""
+
+    def test_non_integer_week_levels_are_marked_infeasible(self):
+        """Non-integer week choices are impossible with integer ship counts."""
+        self.assertFalse(_is_integral_week_level(0.5))
+        self.assertFalse(_is_integral_week_level(2.5))
+        self.assertTrue(_is_integral_week_level(1.0))
+        self.assertTrue(_is_integral_week_level(7.0))
+
+    def test_weekly_average_capacity_bounds_use_rank_caps(self):
+        """The derived bounds should be far tighter than a loose global Big-M."""
+        capacities = [50.0, 80.0, 100.0]
+        week_levels = [0.5, 1.0, 2.0, 3.0, 4.0]
+        tuneparams = {
+            'turnon-vessel_speed_optimization': 0,
+            'BigM-n_ships': 2,
+            'BigM-line_capacity': 30000.0,
+        }
+
+        bounds = _derive_weekly_average_capacity_upper_bounds(capacities, week_levels, tuneparams)
+
+        self.assertEqual(bounds[0], 0.0)
+        self.assertAlmostEqual(bounds[1], 100.0)
+        self.assertAlmostEqual(bounds[2], 100.0)
+        self.assertAlmostEqual(bounds[3], (100.0 + 100.0 + 80.0) / 3.0)
+        self.assertAlmostEqual(bounds[4], (100.0 + 100.0 + 80.0 + 80.0) / 4.0)
+        self.assertLess(max(bounds), tuneparams['BigM-line_capacity'])
     
     def test_capacity_slack_allowed(self):
         """Test that flow can be less than capacity"""

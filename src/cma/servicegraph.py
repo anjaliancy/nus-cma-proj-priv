@@ -26,6 +26,66 @@ from .serviceline import ServiceLine, LineAction, Path, Slot, Segment
 from .rl_utils import MatrixAnalyzer
 from .utils import apply_prediction
 
+def _is_integral_week_level(week_level: float, tol: float = 1e-9) -> bool:
+	"""Return True when a week choice is feasible under integer ship counts."""
+	return week_level > 0 and math.isclose(week_level, round(week_level), abs_tol=tol)
+
+def _derive_weekly_average_capacity_upper_bounds(
+		ships_capacities: list[float],
+		week_levels: list[float],
+		tuneparams: dict[str, float]
+	) -> list[float]:
+	"""Upper bounds for `(ship_vars @ capacities) / wk` in the week-capacity switch.
+
+	When the accurate speed branch is active (`turnon-vessel_speed_optimization <= 0.5`),
+	`BigM-n_ships` implies a per-rank cap on `ship_vars`, so we can derive tighter
+	week-specific bounds by greedily packing the largest vessel classes first. Otherwise
+	the weekly average capacity is bounded by the single largest vessel class.
+	"""
+	caps_desc = sorted(
+		(float(cap) for cap in ships_capacities if cap is not None and cap > 0),
+		reverse=True
+	)
+	if len(caps_desc) == 0:
+		return [0.0 for _ in week_levels]
+
+	fallback_bound = float(tuneparams.get('BigM-line_capacity', caps_desc[0]))
+	if (not math.isfinite(fallback_bound)) or fallback_bound <= 0:
+		fallback_bound = caps_desc[0]
+
+	per_rank_limit: int | None = None
+	if tuneparams.get('turnon-vessel_speed_optimization', 0) <= 0.5:
+		raw_limit = float(tuneparams.get('BigM-n_ships', 0))
+		if math.isfinite(raw_limit) and raw_limit > 0:
+			per_rank_limit = max(1, int(math.floor(raw_limit)))
+
+	upper_bounds: list[float] = []
+	for wk in week_levels:
+		if not _is_integral_week_level(wk):
+			upper_bounds.append(0.0)
+			continue
+
+		if per_rank_limit is None:
+			upper_bounds.append(caps_desc[0])
+			continue
+
+		n_ships = int(round(wk))
+		remaining = n_ships
+		total_capacity = 0.0
+		for cap in caps_desc:
+			if remaining <= 0:
+				break
+			n_take = min(remaining, per_rank_limit)
+			total_capacity += n_take * cap
+			remaining -= n_take
+
+		if remaining > 0:
+			upper_bounds.append(fallback_bound)
+		else:
+			upper_bounds.append(total_capacity / n_ships)
+
+	return upper_bounds
+
 class GraphAction:
 	"""This class defines the class of action that adjust the graph of servicelines
 
@@ -447,13 +507,15 @@ class ServiceGraph:
 			tuneparams_2={
 				'turnon-transship_shipclass_restriction': 0, # making the algorithm slow
 				'turnon-vessel_speed_optimization': 0,       # making the algorithm super slow
+				'turnon-tight_line_capacity_linearization': 1,
 				'ctrparam-kts_buffer': 0,
 				'ctrparam-transship_A': 100,
 				'unfulfilled_demand_penalty': 1e6,
+				'turnon-demand_fulfillment_cap': 1,
 				'BigM-transship': 10000,
 				'BigM-n_ships' : 2,  # at most 2 ships of the same type
 				'BigM-saildays': 64,  # at most 9 weeks, hence less than 64 days
-				'BigM-line_capacity': 30000,  # at most 2 ships, with the largest capacity 14810
+				'BigM-line_capacity': 30000,  # legacy fallback only; tight bounds are derived from vessels
 				'BigM-portcall_cost': 2e9     # unavailable dummy is 1e6, at most 200 calls in a line
 			}
 		):
@@ -517,6 +579,7 @@ class ServiceGraph:
 			tuneparams: dict[str, float] = {
 				'turnon-transship_shipclass_restriction': 0, # making the algorithm slow
 				'turnon-vessel_speed_optimization': 0,       # making the algorithm super slow
+				'turnon-tight_line_capacity_linearization': 1,
 				'turnon-port_operations_constraint': 1,      # enforce port stay >= operations/productivity
 				'turnon-transit_time_penalty': 1,            # penalize paths exceeding expected transit time
 				'ctrparam-kts_buffer': 0,
@@ -525,10 +588,11 @@ class ServiceGraph:
 				'ctrparam-speed_soft_cap_kts': 16.5,         # soft cap for speed (penalty above this)
 				'ctrparam-speed_penalty_multiplier': 2.0,    # multiply fuel cost by this factor above soft cap
 				'ctrparam-transit_penalty_multiplier': 1000.0,  # USD per TEU-day of excess transit time
+				'turnon-demand_fulfillment_cap': 1,          # keep OD fulfillment <= observed demand
 				'BigM-transship': 10000,
 				'BigM-n_ships' : 2,           # at most 2 ships of the same type
 				'BigM-saildays': 64,          # at most 9 weeks, hence less than 64 days
-				'BigM-line_capacity': 30000,  # at most 2 ships, with the largest capacity 14810
+				'BigM-line_capacity': 30000,  # legacy fallback only; tight bounds are derived from vessels
 				'BigM-portcall_cost': 2e9     # unavailable dummy is 2e6, at most 1000 calls in a line
 			}
 		) -> dict:
@@ -720,12 +784,24 @@ class ServiceGraph:
 		n_weeks = len(week_levels)
 		week_vars = cp.Variable(shape=(n_lines, n_weeks), name='N', boolean=True)
 		constraints.append(cp.sum(week_vars, axis=1)==1)
+		infeasible_week_indices = [idx for idx, wk in enumerate(week_levels) if not _is_integral_week_level(wk)]
+		feasible_week_indices = [idx for idx in range(n_weeks) if idx not in infeasible_week_indices]
+		for idx_wk in infeasible_week_indices:
+			constraints.append(week_vars[:, idx_wk] == 0)
+		if len(feasible_week_indices) == 0:
+			raise ValueError('No feasible integer week levels remain after filtering.')
 
 		# Fix weeks for frozen lines
 		for idx_line, line in enumerate(self.__lines_list):
 			if line.frozen and line.frozen_weeks is not None:
-				# Find index of week_levels closest to line.frozen_weeks
-				wk_idx = np.argmin([abs(w - line.frozen_weeks) for w in week_levels])
+				if not _is_integral_week_level(line.frozen_weeks):
+					raise ValueError(
+						f'Frozen line "{line.name()}" requires non-integer weeks={line.frozen_weeks}, '
+						'which is infeasible with integer ship counts.'
+					)
+				# Find index of the closest feasible week level.
+				wk_idx_local = int(np.argmin([abs(week_levels[i] - line.frozen_weeks) for i in feasible_week_indices]))
+				wk_idx = feasible_week_indices[wk_idx_local]
 				constraints.append(week_vars[idx_line, wk_idx] == 1)
 
 		# (5) Create Buffer Violation Slack Variables
@@ -1197,13 +1273,19 @@ class ServiceGraph:
 		obj_expr += cp.sum(eps_vars) * tuneparams.get('unfulfilled_demand_penalty', 1e6)
 		#
 		# endregion		# region Key Constraints
-		# Constraint: (Weekly Demand Flow) sum X_{odp} >= (Weekly Demand) D_{od}
+		# Constraint: (Weekly Demand Flow) sum X_{odp} is bounded by observed demand.
+		# The lower bound is softened by eps_vars; the upper bound prevents the
+		# optimizer from routing more TEUs than exist for an OD pair.
+		cap_demand_fulfillment = tuneparams.get('turnon-demand_fulfillment_cap', 1) > 0.5
 		for idx_od, (pair_od, demand_vars_od) in enumerate(zip(od_pairs, demand_vars)):
 			demand_od = portgraph.get_demand_by_idx(pair_od[0], pair_od[1])
 			demand_od_fulfill = 0
 			for x_od_p in demand_vars_od:
 				demand_od_fulfill += x_od_p
 			constraints.append(demand_od_fulfill >= demand_od - eps_vars[idx_od])
+			constraints.append(eps_vars[idx_od] <= demand_od)
+			if cap_demand_fulfillment:
+				constraints.append(demand_od_fulfill <= demand_od)
 
 		# Constraint: (Weekly Edge Flow) sum_T Y_{T, i, j} >= (Weekly Line Demand Flow) sum_{p has (i,j)} X_{o, d, p}
 		for seg_id, seg_demand_flow in seg_demand_flows.items():
@@ -1212,7 +1294,11 @@ class ServiceGraph:
 		# Constraint: (Weekly Line Flow) Y <= (Weekly Line Capacity) C
 		ships_capacities = [s.vessel_capacity for s in vesselpool.vessels_list]
 		line_capacities = ship_vars @ ships_capacities  # shape = (line,)
+		use_tight_line_capacity = tuneparams.get('turnon-tight_line_capacity_linearization', 1) > 0.5
 		bigM_line_capacity = tuneparams['BigM-line_capacity']
+		weekly_capacity_upper_bounds = _derive_weekly_average_capacity_upper_bounds(
+			ships_capacities, week_levels, tuneparams
+		)
 		
 		# Constraint: Vessel Identity (Sum of ships == Weeks of roundtrip)
 		# This must hold regardless of speed optimization mode
@@ -1223,15 +1309,28 @@ class ServiceGraph:
 		for idx_line in range(n_lines):
 			line_capacity = line_capacities[idx_line]
 			line_week_vars = week_vars[idx_line, :]
-			aux_capacity_weeks = cp.Variable(shape=n_weeks)  # Z_{week=k} * LC / k for each k
+			aux_capacity_weeks = cp.Variable(
+				shape=n_weeks,
+				nonneg=use_tight_line_capacity
+			)  # Z_{week=k} * LC / k for each k
 			constraints.extend(Y_T_seg <= cp.sum(aux_capacity_weeks) for Y_T_seg in flow_vars[idx_line])
 			for idx_wk, wk in enumerate(week_levels):  # loop over weeks
 				aux_C_Wk = aux_capacity_weeks[idx_wk]
 				is_wk = line_week_vars[idx_wk]
-				constraints.append(aux_C_Wk <= bigM_line_capacity * is_wk)
-				constraints.append(aux_C_Wk >= -bigM_line_capacity * is_wk)
-				constraints.append(aux_C_Wk <= line_capacity / wk + bigM_line_capacity * (1 - is_wk))
-				constraints.append(aux_C_Wk >= line_capacity / wk - bigM_line_capacity * (1 - is_wk))
+				if use_tight_line_capacity:
+					capacity_ub = weekly_capacity_upper_bounds[idx_wk]
+					if capacity_ub <= 0:
+						constraints.append(aux_C_Wk == 0)
+						continue
+					# Standard linearization for a nonnegative binary-product.
+					constraints.append(aux_C_Wk <= capacity_ub * is_wk)
+					constraints.append(aux_C_Wk <= line_capacity / wk)
+					constraints.append(aux_C_Wk >= line_capacity / wk - capacity_ub * (1 - is_wk))
+				else:
+					constraints.append(aux_C_Wk <= bigM_line_capacity * is_wk)
+					constraints.append(aux_C_Wk >= -bigM_line_capacity * is_wk)
+					constraints.append(aux_C_Wk <= line_capacity / wk + bigM_line_capacity * (1 - is_wk))
+					constraints.append(aux_C_Wk >= line_capacity / wk - bigM_line_capacity * (1 - is_wk))
 		#
 		# endregion
 
@@ -1261,6 +1360,35 @@ class ServiceGraph:
 					prob.solve()
 		#
 		#endregion
+
+		solver_extra = getattr(prob.solver_stats, 'extra_stats', None)
+		solver_mip_gap = None
+		solver_best_bound = None
+		solver_obj_val = None
+		solver_runtime = getattr(prob.solver_stats, 'solve_time', None)
+		solver_node_count = None
+		if solver_extra is not None:
+			for attr_name, target_name in [
+				('MIPGap', 'solver_mip_gap'),
+				('ObjBound', 'solver_best_bound'),
+				('ObjVal', 'solver_obj_val'),
+				('Runtime', 'solver_runtime'),
+				('NodeCount', 'solver_node_count'),
+			]:
+				try:
+					attr_val = getattr(solver_extra, attr_name)
+				except Exception:
+					continue
+				if target_name == 'solver_mip_gap':
+					solver_mip_gap = attr_val
+				elif target_name == 'solver_best_bound':
+					solver_best_bound = attr_val
+				elif target_name == 'solver_obj_val':
+					solver_obj_val = attr_val
+				elif target_name == 'solver_runtime':
+					solver_runtime = attr_val
+				elif target_name == 'solver_node_count':
+					solver_node_count = attr_val
 
 		# 1. TEU Input and Fulfilled
 		total_teus_input = 0.0
@@ -1364,6 +1492,13 @@ class ServiceGraph:
 			'kpi_avg_delay_days': avg_delay_days,
 			'kpi_lines_buffer_above_30': lines_buffer_above_30,
 			'kpi_lines_buffer_below_15': lines_buffer_below_15,
+			'solver_status': prob.status,
+			'solver_name': prob.solver_stats.solver_name,
+			'solver_solve_time': solver_runtime,
+			'solver_mip_gap': solver_mip_gap,
+			'solver_best_bound': solver_best_bound,
+			'solver_obj_val': solver_obj_val,
+			'solver_node_count': solver_node_count,
 		}
 
 	def fulfill_demands_2(self,
