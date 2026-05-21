@@ -38,6 +38,7 @@ data_file_vessel = "input/Vessel_Nominal.csv"
 data_file_port = "input/Port_Dataset.csv"
 data_file_port_call = "data_2024-12-23/PORT_CALL_Details_Dataset.xlsx"
 data_file_sail_distance = "data_2024-12-23/SAILING_DISTANCE_Dataset.csv"
+data_file_sail_distance_cnc = "input/Distances_CNC_Dataset.xlsx"
 data_file_demand = "data_2024-12-23/Demand_Dataset.xlsx"
 
 # CNC enhanced port operation files (56 ports with detailed operational data)
@@ -303,11 +304,17 @@ def read_port_data() -> Tuple[PortPool, PortPool]:
 
 def read_sailing_distance_data(portpool: PortPool) -> np.ndarray:
 	"""input `portpool` to determine the size of distance matrix
+
+	CNC MILP experiments should use the CNC-provided distance matrix when it
+	contains a port pair. The legacy 2024-12-23 sailing-distance CSV is kept as
+	a fallback for ports outside the CNC matrix so older workflows that use the
+	full 182-port pool can still build a mostly populated matrix.
 	"""
 	port_mapping = {
 		p.get_id() : idx for idx, p in enumerate(portpool.tolist_port())
 	}
 	dist_matrix = np.ones((len(port_mapping), len(port_mapping))) * float('inf')
+
 	file = resources.files('cma.res').joinpath(data_file_sail_distance)
 	df = pd.read_csv(str(file), low_memory=False)  # read first table
 	df = df.rename(columns=lambda x: x.strip())  # trim titles
@@ -320,6 +327,32 @@ def read_sailing_distance_data(portpool: PortPool) -> np.ndarray:
 			dist_matrix[from_port, to_port] = dist
 		# else:
 		#     print(row)
+
+	file_cnc = resources.files('cma.res').joinpath(data_file_sail_distance_cnc)
+	df_cnc = pd.read_excel(file_cnc, sheet_name='Distance Matrix')
+	df_cnc = df_cnc.rename(columns=lambda x: str(x).strip())
+	if 'PORTS' not in df_cnc.columns:
+		raise ValueError(f'CNC distance matrix "{data_file_sail_distance_cnc}" must contain a PORTS column.')
+
+	df_cnc['PORTS'] = df_cnc['PORTS'].astype(str).str.strip()
+	df_cnc = df_cnc.set_index('PORTS')
+	cnc_port_ids = [
+		str(port_id).strip()
+		for port_id in df_cnc.index.tolist()
+		if pd.notna(port_id)
+	]
+	for from_port_id in cnc_port_ids:
+		from_port = port_mapping.get(from_port_id, -1)
+		if from_port < 0:
+			continue
+		for to_port_id in cnc_port_ids:
+			to_port = port_mapping.get(to_port_id, -1)
+			if to_port < 0 or to_port_id not in df_cnc.columns:
+				continue
+			dist = df_cnc.at[from_port_id, to_port_id]
+			if pd.notna(dist):
+				dist_matrix[from_port, to_port] = float(dist)
+
 	np.fill_diagonal(dist_matrix, 0)
 	return np.matrix(dist_matrix)
 
@@ -562,10 +595,15 @@ def read_cnc_proforma_data(portpool: PortPool, vesselpool: VesselPool) -> dict:
 			anchor_wd = first_row['eosp_utc_wd']
 			anchor_hr = first_row['eosp_utc_hr']
 			v_rank = int(first_row['vrank'])
+			service_type = str(first_row['svc_type']).strip().upper()
+			duration_days = float(first_row['duration'])
+			proforma_weeks = duration_days / 7.0 if duration_days > 0 else None
 			
 			if hasattr(line, 'set_schedule_profile'):
 				line.set_schedule_profile(anchor_wd, anchor_hr, leg_durations)
+			line.service_type = service_type
 			line.vessel_rank = v_rank
+			line.week = proforma_weeks if proforma_weeks is not None else line.week
 			
 		except Exception as e:
 			# Some ports might not be in portpool, skip those lines
@@ -602,4 +640,3 @@ def randomly_create_lines(
 		)
 		current_lines.append(line)
 	return current_lines
-

@@ -261,6 +261,7 @@ class ServiceLine:
 	frozen_speed: float | None = None
 	frozen_weeks: float | None = None
 	vessel_rank: int | None = None
+	service_type: str = 'OWN'
 	anchor_eosp_wd: float | None = None
 	anchor_eosp_hr: float | None = None
 	proforma_leg_durations: list[float] | None = None
@@ -274,6 +275,7 @@ class ServiceLine:
 		self._buffer_wait_times = None
 		self._buffer_speeds_to_next = None
 		self._buffer_ignore_lb = False
+		self.service_type = 'OWN'
 
 		if (not _test) and False is self.check_valid(warn, portgraph=portgraph):
 			if verbose:
@@ -557,6 +559,7 @@ class ServiceLine:
 		target.anchor_eosp_wd = self.anchor_eosp_wd
 		target.anchor_eosp_hr = self.anchor_eosp_hr
 		target.vessel_rank = self.vessel_rank
+		target.service_type = self.service_type
 		target.frozen = self.frozen
 		target.frozen_speed = self.frozen_speed
 		target.frozen_weeks = self.frozen_weeks
