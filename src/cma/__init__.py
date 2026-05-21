@@ -11,6 +11,10 @@ from .vessel import Vessel, VesselPool
 from .port import Port, PortPool, PortGraph
 from .serviceline import ServiceLine, LineAction, create_service_line
 from .servicegraph import ServiceGraph
+from .output_summary import \
+		build_milp_output_summary_dataframe, \
+		build_run_metadata_dataframe, \
+		export_milp_output_summary
 from .mcts import MonteCarloTreeSearchNode, MonteCarloTree
 from .rl_utils import MatrixAnalyzer
 from .data_reader import \

@@ -86,6 +86,36 @@ def _derive_weekly_average_capacity_upper_bounds(
 
 	return upper_bounds
 
+def _solution_float(expr, default: float | None = None) -> float | None:
+	"""Return a scalar float from a CVXPY expression, variable slice, or number."""
+	if hasattr(expr, 'value'):
+		expr = expr.value
+	if expr is None:
+		return default
+	arr = np.asarray(expr)
+	if arr.size == 0:
+		return default
+	try:
+		val = float(arr.reshape(-1)[0])
+	except (TypeError, ValueError):
+		return default
+	if not math.isfinite(val):
+		return default
+	return val
+
+def _solution_vector(expr, length: int | None = None) -> list[float]:
+	"""Return a flat numeric vector from a CVXPY expression, variable, or array."""
+	if hasattr(expr, 'value'):
+		expr = expr.value
+	if expr is None:
+		return [] if length is None else [0.0 for _ in range(length)]
+	arr = np.asarray(expr, dtype=float).reshape(-1)
+	if length is not None and arr.size < length:
+		arr = np.pad(arr, (0, length - arr.size))
+	if length is not None:
+		arr = arr[:length]
+	return [float(x) if math.isfinite(float(x)) else 0.0 for x in arr]
+
 class GraphAction:
 	"""This class defines the class of action that adjust the graph of servicelines
 
@@ -816,60 +846,65 @@ class ServiceGraph:
 		# endregion
 
 		# region Middle Expressions
-		def add_ele_to_counts_dict(dict_key: str, dict_val: int | cp.Expression, counts_dict: dict):
+		def add_ele_to_counts_dict(dict_key, dict_val: int | cp.Expression, counts_dict: dict):
 			if dict_key not in counts_dict:
 				counts_dict[dict_key] = dict_val
 			else:
 				counts_dict[dict_key] += dict_val
 
-		# Weekly Transshipment & Weekly Segment Demand Flow
+		service_line_to_idx = {line: idx for idx, line in enumerate(self.__lines_list)}
+		service_line_name_to_idx = {
+			line.name(): idx for idx, line in enumerate(self.__lines_list)
+		}
+		def get_service_line_idx(line: ServiceLine) -> int:
+			idx_line = service_line_to_idx.get(line)
+			if idx_line is None:
+				idx_line = service_line_name_to_idx.get(line.name())
+			if idx_line is None:
+				raise ValueError(f'Service line {line.name()} in a path is not in this ServiceGraph.')
+			return idx_line
+
+		# Weekly Transshipment & Weekly Service-Line Slot Demand Flow
 		transshipments = np.array([
 			[0 for _ in portgraph.tolist_port()]
 				for _ in self.__lines_list], dtype=object)
 		# >> `transship_amounts`: all demand of each port for each line
 		#     - row     = lines
 		#     - columns = ports
-		seg_demand_flows: dict[str, cp.Expression] = {}
-		# >> `seg_demand_flows`: all demand of each segment
-		#     - key   = segment (od)
-		#     - value = sum_{od} X_{od, p}
+		line_slot_demand_flows: dict[tuple[int, int], cp.Expression] = {}
+		# >> `line_slot_demand_flows`: all demand of each exact service-line slot
+		#     - key   = (line index, slot index)
+		#     - value = sum_{od,p uses this line-slot} X_{od,p}
 		for demand_vars_od, od, od_paths in zip(demand_vars, od_pairs, od_pair_paths):
 			for idx_path, p in enumerate(od_paths):
 				x_od_p = demand_vars_od[idx_path]
 				# 1. there are loading/unloading at `o`, `d` ports
 				first_line = p.get_first_service_line()
 				last_line = p.get_last_service_line()
-				first_idx_line = self.__lines_list.index(first_line)
-				last_idx_line = self.__lines_list.index(last_line)
+				first_idx_line = get_service_line_idx(first_line)
+				last_idx_line = get_service_line_idx(last_line)
 				transshipments[first_idx_line, od[0]] += x_od_p
 				transshipments[last_idx_line, od[1]] += x_od_p
-				service_line_old = None
+				service_idx_old = None
 				for slot in p.tolist_slot():
-					slot_service = slot.get_service()
-					if service_line_old is None:
-						service_line_old = slot_service
+					slot_idx_line = get_service_line_idx(slot.get_service())
+					if service_idx_old is None:
+						service_idx_old = slot_idx_line
 					else:
 						# 2. there is transshipment at port_1
-						if slot.get_service() != service_line_old:
-							old_service_idx = self.__lines_list.index(service_line_old)
-							new_service_idx = self.__lines_list.index(slot_service)
+						if slot_idx_line != service_idx_old:
 							port_1 = slot.get_start()
 							port_1_idx = portgraph.get_unique_index(port_1)
-							transshipments[old_service_idx, port_1_idx] += x_od_p
-							transshipments[new_service_idx, port_1_idx] += x_od_p
-					# 3. add demand flow to segment
-					seg = slot.get_segment()
-					add_ele_to_counts_dict(str(seg), x_od_p, seg_demand_flows)
-
-		# Weekly Segment Flow
-		seg_flows: dict[str, cp.Expression] = {}
-		# >> `seg_flows`: all flow of each segment
-		#     - key   = segment (i, j)
-		#     - value = sum_{i,j} Y_{p, i, j}
-		for y_T, line in zip(flow_vars, self.__lines_list):
-			for idx_line, slot in enumerate(line.tolist_slot()):
-				seg = slot.get_segment()
-				add_ele_to_counts_dict(str(seg), y_T[idx_line], seg_flows)
+							transshipments[service_idx_old, port_1_idx] += x_od_p
+							transshipments[slot_idx_line, port_1_idx] += x_od_p
+							service_idx_old = slot_idx_line
+					# 3. add demand flow to the exact service-line slot used by this path
+					idx_slot = self.__lines_list[slot_idx_line].get_segment_idx(slot.get_segment())
+					if idx_slot < 0:
+						raise ValueError(
+							f'Slot {slot} is not present in service line {self.__lines_list[slot_idx_line].name()}.'
+						)
+					add_ele_to_counts_dict((slot_idx_line, idx_slot), x_od_p, line_slot_demand_flows)
 
 		# Path Distance `M_{ od, path }`
 		all_paths_distance: list[list[float]] = []
@@ -884,11 +919,16 @@ class ServiceGraph:
 		# region Objective
 		# 1. Weekly Chartering Cost
 		daily_charter_costs = vesselpool.get_chartering_costs()
+		line_chartering_exprs = [
+			7 * (ship_vars[idx_line, :] @ daily_charter_costs)
+			for idx_line in range(n_lines)
+		]
 		expr_chartering = 7 * cp.sum(ship_vars @ daily_charter_costs)
 		obj_expr += expr_chartering
 
 		# 2. Weekly Transshipment Cost
 		expr_transshipment = 0
+		line_transshipment_exprs: list[typing.Any] = []
 		# 1) transshipment cost per hour for each port
 		ports_list = portgraph.tolist_port()
 		ports_costs_transsip = [port.cost_transship for port in ports_list]
@@ -931,7 +971,9 @@ class ServiceGraph:
 						constraints.append(matrix_stay_days[idx_line, idx_port] == 0)
 			
 			for idx_line in range(n_lines):
-				expr_transshipment += 24 * cp.sum(matrix_stay_days[idx_line, :] * ports_costs_transsip)
+				line_expr = 24 * cp.sum(cp.multiply(matrix_stay_days[idx_line, :], ports_costs_transsip))
+				line_transshipment_exprs.append(line_expr)
+				expr_transshipment += line_expr
 			obj_expr += expr_transshipment
 		else:
 			# Legacy mode: direct calculation (circular definition)
@@ -949,7 +991,9 @@ class ServiceGraph:
 						# Zero productivity: no port operations possible
 						stay_days_per_port.append(0)
 				matrix_stay_days[idx_line, :] = stay_days_per_port
-				expr_transshipment += 24 * (matrix_stay_days[idx_line, :] @ ports_costs_transsip)
+				line_expr = 24 * (matrix_stay_days[idx_line, :] @ ports_costs_transsip)
+				line_transshipment_exprs.append(line_expr)
+				expr_transshipment += line_expr
 			obj_expr += expr_transshipment
 
 		# Big M's method for transshipment ship class restriction
@@ -964,6 +1008,10 @@ class ServiceGraph:
 
 		# 3. Weekly Bukering Cost
 		expr_bunkering = 0
+		line_bunkering_exprs: list[typing.Any] = []
+		line_speed_choice_vars: list[typing.Any | None] = []
+		line_buffer_penalty_lb_exprs: list[typing.Any] = []
+		line_buffer_penalty_ub_exprs: list[typing.Any] = []
 		daily_bukering_cost_rates, speed_level0 = vesselpool.get_bukering_costs()  # shape = (rank, speed)
 		KTS_levels = vesselpool.get_speed_levels()
 		n_speed_level = len(KTS_levels)
@@ -986,6 +1034,8 @@ class ServiceGraph:
 		for idx_line, line in enumerate(self.__lines_list):
 			line_ship_vars = ship_vars[idx_line, :]   # shape = (rank,)
 			line_distance = line.get_distance(portgraph)
+			line_buffer_penalty_lb_expr = 0.0
+			line_buffer_penalty_ub_expr = 0.0
 			
 			# Operations like inf - inf produce NaN, which crashes Gurobi.
 			is_distance_invalid = np.isinf(line_distance) or line_distance <= 0
@@ -1040,7 +1090,10 @@ class ServiceGraph:
 					constraints.append(line_sailing_days * 24 * line.frozen_speed == line_distance)
 
 			if tuneparams['turnon-vessel_speed_optimization'] > 1/2:
-				expr_bunkering += 7 * line_ship_vars @ vesselpool.get_bukering_cost_middle()
+				line_speed_choice_vars.append(None)
+				line_bunkering_expr = 7 * line_ship_vars @ vesselpool.get_bukering_cost_middle()
+				line_bunkering_exprs.append(line_bunkering_expr)
+				expr_bunkering += line_bunkering_expr
 				
 				if not is_distance_invalid:
 					# Constraint: KTS_min <= Speed (distance / sailing days) <= KTS_max
@@ -1066,11 +1119,13 @@ class ServiceGraph:
 					buffer_penalty_ub = tuneparams.get('ctrparam-buffer_penalty_above_30pct', 2000.0)
 
 					constraints.append(numerator <= 0.30 * denominator_hours + buffer_violation_ub[idx_line])
-					obj_expr += buffer_penalty_ub * buffer_violation_ub[idx_line]
+					line_buffer_penalty_ub_expr = buffer_penalty_ub * buffer_violation_ub[idx_line]
+					obj_expr += line_buffer_penalty_ub_expr
 					
 					if not ignore_lb:
 						constraints.append(numerator >= 0.15 * denominator_hours - buffer_violation_lb[idx_line])
-						obj_expr += buffer_penalty_lb * buffer_violation_lb[idx_line]
+						line_buffer_penalty_lb_expr = buffer_penalty_lb * buffer_violation_lb[idx_line]
+						obj_expr += line_buffer_penalty_lb_expr
 					else:
 						# If ignore_lb, we still need to constrain the slack to zero or just not use it
 						constraints.append(buffer_violation_lb[idx_line] == 0)
@@ -1083,11 +1138,14 @@ class ServiceGraph:
 				# Auxiliary Variable:
 				#     W_{r,k} = line_ship_vars_{r} * KTS_vars_{k}
 				aux_W_shipspeed = cp.Variable(shape=daily_bukering_cost_rates.shape)  # shape = (rank, speed)
-				expr_bunkering += 7 * cp.multiply(aux_W_shipspeed, daily_bukering_cost_rates).sum()
+				line_bunkering_expr = 7 * cp.multiply(aux_W_shipspeed, daily_bukering_cost_rates).sum()
+				line_bunkering_exprs.append(line_bunkering_expr)
+				expr_bunkering += line_bunkering_expr
 
 				# Binary variable for speed
 				#     KTS_vars_{k}
 				line_KTS_vars = cp.Variable(name='Z', shape=(n_speed_level), boolean=True)  # shape = (speed,)
+				line_speed_choice_vars.append(line_KTS_vars)
 				constraints.append(cp.sum(line_KTS_vars) == 1)
 
 				# Fix speed for frozen lines
@@ -1145,11 +1203,13 @@ class ServiceGraph:
 					buffer_penalty_ub = tuneparams.get('ctrparam-buffer_penalty_above_30pct', 2000.0)
 
 					constraints.append(numerator <= 0.30 * denominator_hours + buffer_violation_ub[idx_line])
-					obj_expr += buffer_penalty_ub * buffer_violation_ub[idx_line]
+					line_buffer_penalty_ub_expr = buffer_penalty_ub * buffer_violation_ub[idx_line]
+					obj_expr += line_buffer_penalty_ub_expr
 
 					if not ignore_lb:
 						constraints.append(numerator >= 0.15 * denominator_hours - buffer_violation_lb[idx_line])
-						obj_expr += buffer_penalty_lb * buffer_violation_lb[idx_line]
+						line_buffer_penalty_lb_expr = buffer_penalty_lb * buffer_violation_lb[idx_line]
+						obj_expr += line_buffer_penalty_lb_expr
 					else:
 						constraints.append(buffer_violation_lb[idx_line] == 0)
 				else:
@@ -1157,13 +1217,19 @@ class ServiceGraph:
 					constraints.append(buffer_violation_lb[idx_line] == 0)
 					constraints.append(buffer_violation_ub[idx_line] == 0)
 
+			line_buffer_penalty_lb_exprs.append(line_buffer_penalty_lb_expr)
+			line_buffer_penalty_ub_exprs.append(line_buffer_penalty_ub_expr)
+
 		obj_expr += expr_bunkering
 
 		# 4. Weekly Port Call Cost
 		expr_portcall = 0
+		line_portcall_exprs: list[typing.Any] = []
 		for idx_line, line in enumerate(self.__lines_list):
 			aux_portcall_weeks = cp.Variable(shape=len(week_levels))
-			expr_portcall += aux_portcall_weeks @ [1 / k for k in week_levels]
+			line_portcall_expr = aux_portcall_weeks @ [1 / k for k in week_levels]
+			line_portcall_exprs.append(line_portcall_expr)
+			expr_portcall += line_portcall_expr
 
 			# express `aux_portcall_weeks := line_portcall_cost * line_weeks`
 			line_weeks = week_vars[idx_line]     # binaries, one-hot
@@ -1183,6 +1249,7 @@ class ServiceGraph:
 		
 		# 5. Transit Time Penalty
 		# Penalize paths that exceed expected transit time (cargo value depreciation)
+		expr_transit_penalty = 0
 		if tuneparams.get('turnon-transit_time_penalty', 1) > 0.5:
 			transit_penalty_mult = tuneparams.get('ctrparam-transit_penalty_multiplier', 1000.0)  # USD per TEU-day of tardiness
 			
@@ -1267,10 +1334,12 @@ class ServiceGraph:
 						if estimated_transit > expected_transit and not np.isnan(estimated_transit) and not np.isinf(estimated_transit):
 							tardiness = estimated_transit - expected_transit
 							if tardiness > 0 and tardiness < 1000:  # Cap unreasonably large tardiness
-								obj_expr += transit_penalty_mult * tardiness * x_od_p
+								expr_transit_penalty += transit_penalty_mult * tardiness * x_od_p
+		obj_expr += expr_transit_penalty
 
 		# 6. Weekly Unfulfilled Demand Penalty
-		obj_expr += cp.sum(eps_vars) * tuneparams.get('unfulfilled_demand_penalty', 1e6)
+		expr_unfulfilled_demand_penalty = cp.sum(eps_vars) * tuneparams.get('unfulfilled_demand_penalty', 1e6)
+		obj_expr += expr_unfulfilled_demand_penalty
 		#
 		# endregion		# region Key Constraints
 		# Constraint: (Weekly Demand Flow) sum X_{odp} is bounded by observed demand.
@@ -1287,9 +1356,10 @@ class ServiceGraph:
 			if cap_demand_fulfillment:
 				constraints.append(demand_od_fulfill <= demand_od)
 
-		# Constraint: (Weekly Edge Flow) sum_T Y_{T, i, j} >= (Weekly Line Demand Flow) sum_{p has (i,j)} X_{o, d, p}
-		for seg_id, seg_demand_flow in seg_demand_flows.items():
-			constraints.append(seg_flows[seg_id] >= seg_demand_flow)
+		# Constraint: service-line slot flow covers only demand routed on that exact line/slot.
+		# This prevents capacity pooling between different services that share the same directed port pair.
+		for (idx_line, idx_slot), slot_demand_flow in line_slot_demand_flows.items():
+			constraints.append(flow_vars[idx_line][idx_slot] >= slot_demand_flow)
 
 		# Constraint: (Weekly Line Flow) Y <= (Weekly Line Capacity) C
 		ships_capacities = [s.vessel_capacity for s in vesselpool.vessels_list]
@@ -1471,12 +1541,135 @@ class ServiceGraph:
 			if lb_viol is not None and lb_viol > 0.01:
 				lines_buffer_below_15 += 1
 
+		buffer_penalty_cost = sum(
+			_solution_float(expr, 0.0) or 0.0
+			for expr in [*line_buffer_penalty_lb_exprs, *line_buffer_penalty_ub_exprs]
+		)
+		transit_penalty_cost = _solution_float(expr_transit_penalty, 0.0) or 0.0
+		unfulfilled_demand_penalty_cost = _solution_float(expr_unfulfilled_demand_penalty, 0.0) or 0.0
+
+		line_diagnostics = []
+		can_read_solution = (
+			ship_vars.value is not None
+			and week_vars.value is not None
+			and len(line_bunkering_exprs) == n_lines
+			and len(line_portcall_exprs) == n_lines
+			and len(line_speed_choice_vars) == n_lines
+		)
+		if can_read_solution:
+			ships_capacities_for_output = [float(s.vessel_capacity) for s in vesselpool.vessels_list]
+			service_line_to_idx = {line: idx for idx, line in enumerate(self.__lines_list)}
+			service_line_name_to_idx = {
+				line.name(): idx for idx, line in enumerate(self.__lines_list)
+			}
+			actual_segment_flows = [
+				[0.0 for _ in line.tolist_slot()]
+				for line in self.__lines_list
+			]
+			for demand_vars_od, od_paths in zip(demand_vars, od_pair_paths):
+				for x_od_p, path in zip(demand_vars_od, od_paths):
+					path_flow = _solution_float(x_od_p, 0.0) or 0.0
+					if path_flow <= 1e-8:
+						continue
+					for path_slot in path.tolist_slot():
+						idx_path_line = service_line_to_idx.get(path_slot.get_service())
+						if idx_path_line is None:
+							idx_path_line = service_line_name_to_idx.get(path_slot.get_service_name())
+						if idx_path_line is None:
+							continue
+						idx_segment = self.__lines_list[idx_path_line].get_segment_idx(path_slot.get_segment())
+						if idx_segment < 0:
+							continue
+						actual_segment_flows[idx_path_line][idx_segment] += path_flow
+
+			for idx_line, line in enumerate(self.__lines_list):
+				week_choice = _solution_vector(week_vars[idx_line, :], n_weeks)
+				selected_week = 0.0
+				if len(week_choice) > 0:
+					selected_week = float(week_levels[int(np.argmax(week_choice))])
+				ship_allocation = _solution_vector(ship_vars[idx_line, :], n_vessel_class)
+				vessel_count = float(sum(ship_allocation))
+				line_capacity_total = float(sum(
+					n_ship * cap for n_ship, cap in zip(ship_allocation, ships_capacities_for_output)
+				))
+				weekly_capacity = line_capacity_total / selected_week if selected_week > 0 else 0.0
+
+				line_sailing_days_val = _solution_float(list_saildays[idx_line], 0.0) or 0.0
+				line_distance = line.get_distance(portgraph)
+				speed_choice = line_speed_choice_vars[idx_line]
+				if speed_choice is not None:
+					speed_probs = _solution_vector(speed_choice, n_speed_level)
+					selected_speed = float(np.dot(speed_probs, KTS_levels)) if len(speed_probs) else None
+				elif line_sailing_days_val > 0 and math.isfinite(line_distance):
+					selected_speed = line_distance / (24.0 * line_sailing_days_val)
+				else:
+					selected_speed = None
+
+				if hasattr(matrix_stay_days, 'value'):
+					port_stay_days = _solution_vector(matrix_stay_days[idx_line, :], portgraph.get_number_of_ports())
+				else:
+					port_stay_days = [
+						_solution_float(x, 0.0) or 0.0
+						for x in matrix_stay_days[idx_line, :]
+					]
+
+				segment_flows = []
+				for idx_slot, (slot, flow_var) in enumerate(zip(line.tolist_slot(), flow_vars[idx_line])):
+					start_id = slot.get_start().get_id()
+					end_id = slot.get_end().get_id()
+					capacity_proxy_flow = _solution_float(flow_var, 0.0) or 0.0
+					actual_flow = actual_segment_flows[idx_line][idx_slot]
+					segment_flows.append({
+						'from_port': start_id,
+						'to_port': end_id,
+						'flow_teu': actual_flow,
+						'capacity_proxy_flow_teu': capacity_proxy_flow,
+					})
+
+				wait_times = line.get_buffer_wait_times()
+				t_wait_total = float(sum(wait_times)) if wait_times else 0.0
+				if selected_week > 0 and selected_speed is not None and selected_speed > 0 and math.isfinite(line_distance):
+					buffer_numerator = t_wait_total + line_distance * (1.0 / selected_speed - 1.0 / 16.5)
+					buffer_value = buffer_numerator / (168.0 * selected_week)
+				else:
+					buffer_value = None
+
+				line_buffer_penalty_lb = _solution_float(line_buffer_penalty_lb_exprs[idx_line], 0.0) or 0.0
+				line_buffer_penalty_ub = _solution_float(line_buffer_penalty_ub_exprs[idx_line], 0.0) or 0.0
+				line_diagnostics.append({
+					'line_index': idx_line,
+					'line_name': line.name(),
+					'selected_week': selected_week,
+					'vessel_count': vessel_count,
+					'ship_allocation': ship_allocation,
+					'selected_speed_kts': selected_speed,
+					'weekly_capacity_teu': weekly_capacity,
+					'line_capacity_total_teu': line_capacity_total,
+					'segment_flows': segment_flows,
+					'port_stay_days': port_stay_days,
+					'line_sailing_days': line_sailing_days_val,
+					'buffer_value': buffer_value,
+					'buffer_violation_lb_hours': _solution_float(buffer_violation_lb[idx_line], 0.0) or 0.0,
+					'buffer_violation_ub_hours': _solution_float(buffer_violation_ub[idx_line], 0.0) or 0.0,
+					'chartering_cost': _solution_float(line_chartering_exprs[idx_line], 0.0) or 0.0,
+					'transshipment_cost': _solution_float(line_transshipment_exprs[idx_line], 0.0) or 0.0,
+					'bunkering_cost': _solution_float(line_bunkering_exprs[idx_line], 0.0) or 0.0,
+					'portcall_cost': _solution_float(line_portcall_exprs[idx_line], 0.0) or 0.0,
+					'buffer_penalty_lb': line_buffer_penalty_lb,
+					'buffer_penalty_ub': line_buffer_penalty_ub,
+					'buffer_penalty_cost': line_buffer_penalty_lb + line_buffer_penalty_ub,
+				})
+
 		return {
-			'total cost': typing.cast(float, prob.value),
-			'chartering cost': float(expr_chartering.value) if hasattr(expr_chartering, 'value') else float(expr_chartering),
-			'transshipment cost': float(expr_transshipment.value) if hasattr(expr_transshipment, 'value') else float(expr_transshipment),
-			'bunkering cost': float(expr_bunkering.value) if hasattr(expr_bunkering, 'value') else float(expr_bunkering),
-			'portcall cost': float(expr_portcall.value) if hasattr(expr_portcall, 'value') else float(expr_portcall),
+			'total cost': _solution_float(prob.value, math.inf),
+			'chartering cost': _solution_float(expr_chartering, 0.0) or 0.0,
+			'transshipment cost': _solution_float(expr_transshipment, 0.0) or 0.0,
+			'bunkering cost': _solution_float(expr_bunkering, 0.0) or 0.0,
+			'portcall cost': _solution_float(expr_portcall, 0.0) or 0.0,
+			'transit penalty cost': transit_penalty_cost,
+			'unfulfilled demand penalty cost': unfulfilled_demand_penalty_cost,
+			'buffer penalty cost': buffer_penalty_cost,
+			'line diagnostics': line_diagnostics,
 			'demand routes': demand_vars,
 			'line flows': flow_vars,
 			'weeks': week_vars,
