@@ -133,12 +133,38 @@ def build_milp_output_summary_dataframe(
 			speed_values = []
 
 		port_stay_days = diag.get('port_stay_days') or []
-		opstime = []
-		for port in ports:
+		port_call_moves = diag.get('port_call_moves') or []
+		dominant_rank = _dominant_rank(ship_allocation)
+		def fallback_opstime_for_port(port) -> float:
 			port_idx = portgraph.get_unique_index(port)
 			num_visits = max(1, len(line.all_index_of_port(port)))
 			stay_days = _finite_float(port_stay_days[port_idx] if port_idx < len(port_stay_days) else 0.0)
-			opstime.append(stay_days * 24.0 / num_visits)
+			return stay_days * 24.0 / num_visits
+		def productivity_for_call(idx_call: int, port) -> float:
+			if port_details and idx_call < len(port_details):
+				prod = _finite_float(port_details[idx_call].get('productivity'))
+				if prod > 0:
+					return prod
+			if dominant_rank is not None:
+				prod = _finite_float(port.berth_productivity.get(dominant_rank))
+				if prod > 0:
+					return prod
+			return 0.0
+
+		opstime = []
+		uses_routed_move_opstime = bool(port_call_moves and len(port_call_moves) == len(ports))
+		if uses_routed_move_opstime:
+			for idx_call, port in enumerate(ports):
+				move_info = port_call_moves[idx_call] or {}
+				moves = _finite_float(move_info.get('moves_teu'))
+				productivity = productivity_for_call(idx_call, port)
+				if productivity > 0:
+					opstime.append(moves / productivity)
+				else:
+					opstime.append(fallback_opstime_for_port(port))
+		else:
+			for port in ports:
+				opstime.append(fallback_opstime_for_port(port))
 
 		if port_details and len(port_details) == len(ports):
 			waittime = [_finite_float(item.get('waiting_time')) for item in port_details]
@@ -166,6 +192,10 @@ def build_milp_output_summary_dataframe(
 		notes = ['MILP-only mod0 summary']
 		if selected_speed is not None:
 			notes.append('speed is line-level and repeated per segment')
+		if uses_routed_move_opstime:
+			notes.append('opstime from routed port moves divided by productivity')
+		else:
+			notes.append('opstime fallback used')
 		if not port_details:
 			notes.append('wait/maneuvering fallback used')
 

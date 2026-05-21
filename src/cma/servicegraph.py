@@ -116,6 +116,113 @@ def _solution_vector(expr, length: int | None = None) -> list[float]:
 		arr = arr[:length]
 	return [float(x) if math.isfinite(float(x)) else 0.0 for x in arr]
 
+def _build_routed_flow_diagnostics(
+		service_lines: list[ServiceLine],
+		demand_vars: list[list[typing.Any]],
+		od_pair_paths: list[list[Path]],
+	) -> tuple[list[list[float]], list[list[dict[str, float | str]]]]:
+	"""Reconstruct routed leg flows and port-call moves from solved path flows.
+
+	Each OD path flow creates one load move at its origin call and one discharge
+	move at its destination call. Every service-line transfer creates two more
+	moves: discharge from the previous service and load onto the next service.
+	"""
+	service_line_to_idx = {line: idx for idx, line in enumerate(service_lines)}
+	service_line_name_to_idx = {
+		line.name(): idx for idx, line in enumerate(service_lines)
+	}
+	actual_segment_flows = [
+		[0.0 for _ in line.tolist_slot()]
+		for line in service_lines
+	]
+	port_call_moves: list[list[dict[str, float | str]]] = [
+		[
+			{
+				'port_id': port.get_id(),
+				'loaded_teu': 0.0,
+				'discharged_teu': 0.0,
+				'transship_loaded_teu': 0.0,
+				'transship_discharged_teu': 0.0,
+				'moves_teu': 0.0,
+			}
+			for port in line.tolist_port()
+		]
+		for line in service_lines
+	]
+
+	def diagnostic_line_idx(slot: Slot) -> int | None:
+		idx_line = service_line_to_idx.get(slot.get_service())
+		if idx_line is None:
+			idx_line = service_line_name_to_idx.get(slot.get_service_name())
+		return idx_line
+
+	def diagnostic_slot_idx(idx_line: int, slot: Slot) -> int:
+		return service_lines[idx_line].get_segment_idx(slot.get_segment())
+
+	def add_port_call_move(idx_line: int, idx_call: int, key: str, amount: float):
+		port_moves = port_call_moves[idx_line][idx_call]
+		port_moves[key] = float(port_moves[key]) + amount
+		port_moves['moves_teu'] = float(port_moves['moves_teu']) + amount
+
+	for demand_vars_od, od_paths in zip(demand_vars, od_pair_paths):
+		for x_od_p, path in zip(demand_vars_od, od_paths):
+			path_flow = _solution_float(x_od_p, 0.0) or 0.0
+			if path_flow <= 1e-8:
+				continue
+			path_slots = path.tolist_slot()
+			if not path_slots:
+				continue
+
+			first_slot = path_slots[0]
+			idx_first_line = diagnostic_line_idx(first_slot)
+			if idx_first_line is not None:
+				idx_first_slot = diagnostic_slot_idx(idx_first_line, first_slot)
+				if idx_first_slot >= 0:
+					add_port_call_move(idx_first_line, idx_first_slot, 'loaded_teu', path_flow)
+
+			last_slot = path_slots[-1]
+			idx_last_line = diagnostic_line_idx(last_slot)
+			if idx_last_line is not None:
+				idx_last_slot = diagnostic_slot_idx(idx_last_line, last_slot)
+				if idx_last_slot >= 0 and len(port_call_moves[idx_last_line]) > 0:
+					idx_discharge_call = (idx_last_slot + 1) % len(port_call_moves[idx_last_line])
+					add_port_call_move(idx_last_line, idx_discharge_call, 'discharged_teu', path_flow)
+
+			previous_line_idx = None
+			previous_slot_idx = None
+			for path_slot in path_slots:
+				idx_path_line = diagnostic_line_idx(path_slot)
+				if idx_path_line is None:
+					continue
+				idx_segment = diagnostic_slot_idx(idx_path_line, path_slot)
+				if idx_segment < 0:
+					continue
+				actual_segment_flows[idx_path_line][idx_segment] += path_flow
+				if (
+						previous_line_idx is not None
+						and previous_slot_idx is not None
+						and idx_path_line != previous_line_idx
+					):
+					idx_unload_call = (
+						(previous_slot_idx + 1) % len(port_call_moves[previous_line_idx])
+					)
+					add_port_call_move(
+						previous_line_idx,
+						idx_unload_call,
+						'transship_discharged_teu',
+						path_flow,
+					)
+					add_port_call_move(
+						idx_path_line,
+						idx_segment,
+						'transship_loaded_teu',
+						path_flow,
+					)
+				previous_line_idx = idx_path_line
+				previous_slot_idx = idx_segment
+
+	return actual_segment_flows, port_call_moves
+
 class GraphAction:
 	"""This class defines the class of action that adjust the graph of servicelines
 
@@ -1558,29 +1665,11 @@ class ServiceGraph:
 		)
 		if can_read_solution:
 			ships_capacities_for_output = [float(s.vessel_capacity) for s in vesselpool.vessels_list]
-			service_line_to_idx = {line: idx for idx, line in enumerate(self.__lines_list)}
-			service_line_name_to_idx = {
-				line.name(): idx for idx, line in enumerate(self.__lines_list)
-			}
-			actual_segment_flows = [
-				[0.0 for _ in line.tolist_slot()]
-				for line in self.__lines_list
-			]
-			for demand_vars_od, od_paths in zip(demand_vars, od_pair_paths):
-				for x_od_p, path in zip(demand_vars_od, od_paths):
-					path_flow = _solution_float(x_od_p, 0.0) or 0.0
-					if path_flow <= 1e-8:
-						continue
-					for path_slot in path.tolist_slot():
-						idx_path_line = service_line_to_idx.get(path_slot.get_service())
-						if idx_path_line is None:
-							idx_path_line = service_line_name_to_idx.get(path_slot.get_service_name())
-						if idx_path_line is None:
-							continue
-						idx_segment = self.__lines_list[idx_path_line].get_segment_idx(path_slot.get_segment())
-						if idx_segment < 0:
-							continue
-						actual_segment_flows[idx_path_line][idx_segment] += path_flow
+			actual_segment_flows, port_call_moves = _build_routed_flow_diagnostics(
+				self.__lines_list,
+				demand_vars,
+				od_pair_paths,
+			)
 
 			for idx_line, line in enumerate(self.__lines_list):
 				week_choice = _solution_vector(week_vars[idx_line, :], n_weeks)
@@ -1646,6 +1735,7 @@ class ServiceGraph:
 					'weekly_capacity_teu': weekly_capacity,
 					'line_capacity_total_teu': line_capacity_total,
 					'segment_flows': segment_flows,
+					'port_call_moves': port_call_moves[idx_line],
 					'port_stay_days': port_stay_days,
 					'line_sailing_days': line_sailing_days_val,
 					'buffer_value': buffer_value,
