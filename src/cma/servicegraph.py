@@ -388,13 +388,14 @@ class ServiceGraph:
 
 # region - Actions related ######################################################
 #
-	def update_by_graph_action(self, graph_action: GraphAction, portgraph: PortGraph) -> 'ServiceGraph':
+	def update_by_graph_action(self, graph_action: GraphAction, portgraph: PortGraph,
+			warn: bool = True) -> 'ServiceGraph':
 		"""
 		Update the current graph by a Graph Action
 		"""
 		old_line = self.__lines_list[graph_action.idx_line]
 		line_action = graph_action.get_line_action(old_line, portgraph)
-		new_line = old_line.apply_action(line_action, portgraph, portgraph=portgraph)
+		new_line = old_line.apply_action(line_action, portgraph, portgraph=portgraph, warn=warn)
 
 		new_services: list[ServiceLine] = self.__lines_list.copy()
 		new_services[graph_action.idx_line] = new_line

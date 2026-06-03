@@ -1136,7 +1136,8 @@ class ServiceLine:
 	# 			re.append(action)
 	# 	return re
 
-	def apply_action(self, action: LineAction, ports_pool: PortPool, _test: bool = False, portgraph: PortGraph | None = None) -> 'ServiceLine':
+	def apply_action(self, action: LineAction, ports_pool: PortPool, _test: bool = False,
+			portgraph: PortGraph | None = None, warn: bool = True) -> 'ServiceLine':
 		"""Apply action to service line
 
 		Input:
@@ -1171,7 +1172,7 @@ class ServiceLine:
 				if p == sequence[0]:
 					sequence.pop(idx)
 		
-		new_line = ServiceLine(self.name(), sequence, _test, portgraph=portgraph)
+		new_line = ServiceLine(self.name(), sequence, _test, warn=warn, portgraph=portgraph)
 		self._copy_metadata_to(new_line)
 		
 		return new_line

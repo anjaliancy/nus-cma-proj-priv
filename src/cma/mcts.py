@@ -32,6 +32,7 @@ class MonteCarloTreeSearchNode:
 	# tree structure
 	number_legal_actions: int
 	borns: list[GraphAction]
+	invalid_actions: list[GraphAction]
 	children: list['MonteCarloTreeSearchNode']
 	parent: Optional['MonteCarloTreeSearchNode']
 
@@ -56,6 +57,7 @@ class MonteCarloTreeSearchNode:
 		self.prior_prob = prior_prob
 
 		# 3. tree structure
+		self.invalid_actions = []
 		actions, _ = self.get_all_actions_and_probs(portgraph)
 		self.number_legal_actions = len(actions)
 		self.borns = []
@@ -83,6 +85,7 @@ class MonteCarloTreeSearchNode:
 			Using Neural Network
 		"""
 		_, actions = self.graph.get_feasible_actions(portgraph)
+		actions = [action for action in actions if action not in self.invalid_actions]
 		probs = [1.0 for _ in actions] #[random.uniform(0, 1) for _ in actions]
 		return actions, probs
 
@@ -202,7 +205,13 @@ class MonteCarloTreeSearchNode:
 		# 			break
 		# 	if c_exist:
 		# 		return c
-		new_graph = self.graph.update_by_graph_action(graph_action, portgraph)
+		try:
+			new_graph = self.graph.update_by_graph_action(graph_action, portgraph, warn=False)
+		except ValueError:
+			if graph_action not in self.invalid_actions:
+				self.invalid_actions.append(graph_action)
+				self.number_legal_actions = max(0, self.number_legal_actions - 1)
+			return None
 		child_node = MonteCarloTreeSearchNode(new_graph, portgraph, prior_prob, self.min_cost, self)
 		self.children.append(child_node)
 		self.borns.append(graph_action)
@@ -217,7 +226,9 @@ class MonteCarloTreeSearchNode:
 			vesselpool: VesselPool,
 			discount_fac: float,
 			valid_weight_proportion: float,
-			week_predictor: None | RegressionResultsWrapper = None
+			week_predictor: None | RegressionResultsWrapper = None,
+			week_levels: None | list[float] | tuple[float, ...] = None,
+			milp_tuneparams: None | dict[str, float] = None
 		):
 		"""
 		Input:
@@ -228,8 +239,13 @@ class MonteCarloTreeSearchNode:
 			2. Evaluate the value of `self` after several steps of adjustments
 		"""
 		# solve immediate value
+		solve_kwargs = {}
+		if week_levels is not None:
+			solve_kwargs['week_levels'] = week_levels
+		if milp_tuneparams is not None:
+			solve_kwargs['tuneparams_2'] = milp_tuneparams
 		self.graph.solve_approximated(portgraph, vesselpool,
-				week_predictor=week_predictor, min_cost=self.min_cost)
+				week_predictor=week_predictor, min_cost=self.min_cost, **solve_kwargs)
 
 		# create a temporary root node whose parent is None
 		tmp_root = MonteCarloTreeSearchNode(self.graph, portgraph, self.prior_prob, self.min_cost, None)
@@ -250,12 +266,12 @@ class MonteCarloTreeSearchNode:
 			the_prior = all_probs[rand_idx]
 			# Add `child_node` to `the_node`
 			child_node = the_node.add_child(the_action, portgraph, the_prior, 999999)
-			assert child_node is not None
-			# child_node is not None since `max_depth = infty`
+			if child_node is None:
+				continue
 
 			the_node: MonteCarloTreeSearchNode = child_node
 			the_node.graph.solve_approximated(portgraph, vesselpool,
-					week_predictor=week_predictor, min_cost=self.min_cost)
+					week_predictor=week_predictor, min_cost=self.min_cost, **solve_kwargs)
 			# Check stopping
 			sum_weight *= discount_fac
 			sum_weight += 1
@@ -294,17 +310,24 @@ class MonteCarloTreeSearchNode:
 
 	def expand(self, portgraph: PortGraph, vesselpool: VesselPool,
 			max_depth: int, c_param: float, discount_fac: float, valid_weight_proportion: float,
-			week_predictor: None | RegressionResultsWrapper = None
+			week_predictor: None | RegressionResultsWrapper = None,
+			week_levels: None | list[float] | tuple[float, ...] = None,
+			milp_tuneparams: None | dict[str, float] = None
 		):
 		"""A more balanced way of expansion
 		"""
 		if self.get_depth() == max_depth:
 			# print("到达最大深度，多进行一次rollout")
-			self.rollout(portgraph, vesselpool, discount_fac, valid_weight_proportion, week_predictor)
+			self.rollout(
+				portgraph, vesselpool, discount_fac, valid_weight_proportion,
+				week_predictor, week_levels, milp_tuneparams)
 			self.back_propagate(discount_fac)
 			return
 
 		actions, probs = self.get_all_actions_and_probs(portgraph)
+		if len(actions) == 0:
+			print("Warning: no valid action in expansion.")
+			return
 		pucb_list = []
 
 		for idx, action in enumerate(actions):
@@ -330,7 +353,9 @@ class MonteCarloTreeSearchNode:
 		else:
 			# print('在 expand 的时候找到已出生的孩子节点，递归进行 expand')
 			c = self.children[self.borns.index(selected_act)]
-			c.expand(portgraph, vesselpool, max_depth, c_param, discount_fac, valid_weight_proportion)
+			c.expand(
+				portgraph, vesselpool, max_depth, c_param, discount_fac,
+				valid_weight_proportion, week_predictor, week_levels, milp_tuneparams)
 
 	def select(self, c_param: float) -> 'MonteCarloTreeSearchNode':
 		"""
@@ -350,6 +375,8 @@ class MonteCarloTreeSearchNode:
 	def search_step(self, portgraph: PortGraph, vesselpool: VesselPool, max_depth: int,
 		 	discount_fac: float, valid_weight_proportion: float, c_param: float = 1,
 			week_predictor: None | RegressionResultsWrapper = None,
+			week_levels: None | list[float] | tuple[float, ...] = None,
+			milp_tuneparams: None | dict[str, float] = None,
 			recorder: None | dict[str,int] = None, display: bool=False
 		):
 		"""Using the more balanced way of expansion
@@ -357,14 +384,18 @@ class MonteCarloTreeSearchNode:
 		c = self.select(c_param)
 
 		if c.number_of_visits == 0:
-			c.rollout(portgraph, vesselpool, discount_fac, valid_weight_proportion, week_predictor)
+			c.rollout(
+				portgraph, vesselpool, discount_fac, valid_weight_proportion,
+				week_predictor, week_levels, milp_tuneparams)
 			c.back_propagate(discount_fac)
 			if recorder is not None:
 				recorder['num_rollout'] += 1
 				if display:
 					print('Select:', c, 'rollout')
 		else:
-			c.expand(portgraph, vesselpool, max_depth, c_param, discount_fac, valid_weight_proportion, week_predictor)
+			c.expand(
+				portgraph, vesselpool, max_depth, c_param, discount_fac,
+				valid_weight_proportion, week_predictor, week_levels, milp_tuneparams)
 			if recorder is not None:
 				recorder['num_expand'] += 1
 				if display:
@@ -419,9 +450,12 @@ class MonteCarloTree:
 	vesselpool: VesselPool
 	c_param: float
 	discount_fac: float  # discount factor `beta`
+	valid_weight_proportion: float
 	max_depth: int
 	week_predict_data: pd.DataFrame
 	week_predict_model: None | RegressionResultsWrapper
+	week_levels: None | list[float] | tuple[float, ...]
+	milp_tuneparams: None | dict[str, float]
 
 	num_expand: int
 	num_rollout: int
@@ -431,10 +465,13 @@ class MonteCarloTree:
 			portgraph: PortGraph,
 			vesselpool: VesselPool,
 			discount_fac:float=0.5,
+			valid_weight_proportion: float=0.9,
 			c_param: float=0.5,
 			max_depth: int=5,
 			min_cost: bool=True,
-			week_predict_model: None | RegressionResultsWrapper = None):
+			week_predict_model: None | RegressionResultsWrapper = None,
+			week_levels: None | list[float] | tuple[float, ...] = None,
+			milp_tuneparams: None | dict[str, float] = None):
 		'''
 		Selected Inputs:
 			`max_depth`: depth of root is zero
@@ -445,8 +482,11 @@ class MonteCarloTree:
 		self.vesselpool = vesselpool
 		self.c_param = c_param
 		self.discount_fac = discount_fac
+		self.valid_weight_proportion = valid_weight_proportion
 		self.max_depth = max_depth
 		self.week_predict_model = week_predict_model
+		self.week_levels = week_levels
+		self.milp_tuneparams = milp_tuneparams
 
 		self.num_expand = 0
 		self.num_rollout = 0
@@ -465,9 +505,11 @@ class MonteCarloTree:
 			self.root_node.search_step(self.portgraph, self.vesselpool,
 				max_depth=self.max_depth,
 				discount_fac=self.discount_fac,
-				valid_weight_proportion=0.9,
+				valid_weight_proportion=self.valid_weight_proportion,
 				c_param=self.c_param,
 				week_predictor=self.week_predict_model,
+				week_levels=self.week_levels,
+				milp_tuneparams=self.milp_tuneparams,
 				recorder=recorder,
 				display=display
 			)
