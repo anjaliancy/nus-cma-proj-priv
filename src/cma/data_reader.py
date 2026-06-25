@@ -56,6 +56,58 @@ data_file_proforma = "input/proforma_CNC.csv"
 data_file_current_line = "data_2024-12-23/CURR_LINES_Dataset.xlsx"
 data_file_current_line_detail = "data_2024-12-23/CURR_LINES_detail_Dataset.xlsx"
 
+# ============================================================================
+# CHANGE 20/06 (SPEED FIX): added MIN_SERVICE_SPEED + normalize_leg_speed().
+# Reason: the proforma data contains illegal sailing speeds below the 10-knot
+# floor (e.g. 1, 3, 7 kn). Speed=1 is really a "missing" placeholder. Left as-is
+# these break cost/schedule calculations, so we normalize every leg's speed here.
+# ============================================================================
+MIN_SERVICE_SPEED = 10.0  # knots; vessels cannot sail below this (CMA rule)
+
+
+def normalize_leg_speed(
+		raw_speed: float,
+		time_to_next: float,
+		waiting_time: float,
+		nominal_speed: float,
+		leg_distance: float | None = None,
+		min_speed: float = MIN_SERVICE_SPEED,
+	) -> tuple[float, float, float]:
+	"""Apply the CMA speed-floor rule to a single rotation leg.
+
+	Returns the corrected ``(speed, time_to_next, waiting_time)``:
+
+	- ``speed <= 1``        -> treated as a missing/placeholder value. If a valid
+	  ``leg_distance`` is supplied it is recomputed as ``leg_distance / time``;
+	  otherwise the vessel ``nominal_speed`` is used. A recomputed value below the
+	  floor is then handled by the clamp rule below.
+	- ``1 < speed < min``   -> clamp the speed up to ``min_speed``. The leg
+	  distance is fixed, so the vessel now arrives early; the saved sailing time
+	  is banked into the waiting time and removed from the sailing time, keeping
+	  the total leg duration (and hence the proforma schedule) unchanged.
+	- ``speed >= min``      -> returned unchanged.
+	"""
+	try:
+		raw_speed = float(raw_speed)
+	except (TypeError, ValueError):
+		raw_speed = 0.0
+	t_next = float(time_to_next) if time_to_next is not None else 0.0
+	t_wait = float(waiting_time) if waiting_time is not None else 0.0
+
+	if raw_speed <= 1.0:
+		# Missing speed: recompute from distance/time when both are usable.
+		if (leg_distance is not None and leg_distance > 0
+				and np.isfinite(leg_distance) and t_next > 0):
+			raw_speed = leg_distance / t_next
+		else:
+			return nominal_speed, t_next, t_wait
+	if raw_speed < min_speed:
+		new_t_next = t_next * raw_speed / min_speed  # same distance, higher speed
+		extra_wait = t_next - new_t_next
+		return min_speed, new_t_next, t_wait + extra_wait
+	return raw_speed, t_next, t_wait
+
+
 def read_vessel_class_data() -> VesselPool:
 	"""Read vessel class data from CNC input/Vessel_Nominal.csv
 	
@@ -491,7 +543,15 @@ def read_current_line_data(portpool: PortPool,
 		if line_name in detail_dict:
 			detail = detail_dict[line_name]
 			line.frozen = str(detail.get('Frozen', 'No')).strip().lower() == 'yes'
-			line.frozen_speed = float(detail.get('Service Speed (nautical miles per hour)', 0))
+			# CHANGE 20/06 (SPEED FIX): enforce the 10 kn speed floor on frozen_speed.
+			# Reason: frozen_speed feeds a hard MILP constraint; a sub-10 value (or 0)
+			# would force an unrealistic/infeasible schedule. No per-leg timings exist
+			# here to rebank the saved time, so we only clamp; <= 1 is treated as
+			# missing/unset (None = let the MILP choose the speed).
+			_raw_speed = float(detail.get('Service Speed (nautical miles per hour)', 0))
+			if 1.0 < _raw_speed < MIN_SERVICE_SPEED:
+				_raw_speed = MIN_SERVICE_SPEED
+			line.frozen_speed = _raw_speed if _raw_speed > 1.0 else None
 			line.frozen_weeks = float(detail.get('Number of vessels', total_weeks))
 			
 			# If frozen, ensure line.week matches frozen_weeks for MILP consistency
@@ -502,9 +562,16 @@ def read_current_line_data(portpool: PortPool,
 		current_lines_weeks.append(line.week)
 	return current_lines, current_lines_weeks
 
-def read_cnc_proforma_data(portpool: PortPool, vesselpool: VesselPool) -> dict:
+def read_cnc_proforma_data(portpool: PortPool, vesselpool: VesselPool,
+		dist_matrix: np.ndarray | None = None) -> dict:
 	"""Read CNC proforma service lines from input/proforma_CNC.csv
-	
+
+	`dist_matrix` (optional) is the port-to-port sailing-distance matrix used to
+	recompute a leg's speed from distance/time when its recorded speed is missing
+	(<= 1 kn). If omitted, it is built lazily on first need via
+	`read_sailing_distance_data`; pass an already-built matrix to avoid that
+	re-read.
+
 	Returns a dictionary with:
 	- 'lines': List of 34 ServiceLine objects representing CNC proforma routes
 	- 'metadata': Dictionary of line metadata (vessel rank, speed, capacity, etc.)
@@ -527,9 +594,28 @@ def read_cnc_proforma_data(portpool: PortPool, vesselpool: VesselPool) -> dict:
 	# Group by line name to get all port calls per line
 	lines = []
 	metadata = {}
-	
+
+	# CHANGE 20/06 (SPEED FIX): lazy port-to-port distance lookup, used to recompute
+	# a leg's speed from distance/time when the recorded speed is missing (<= 1 kn).
+	# Reason: distance/time gives the true implied speed instead of a flat guess.
+	# Built once on first need; the `dist_matrix` param lets callers pass it in to
+	# avoid re-reading the large distance file.
+	_dist_state = {'matrix': dist_matrix, 'port_idx': None}
+
+	def _leg_distance(from_id: str, to_id: str) -> float | None:
+		if _dist_state['matrix'] is None:
+			_dist_state['matrix'] = read_sailing_distance_data(portpool)
+		if _dist_state['port_idx'] is None:
+			_dist_state['port_idx'] = {
+				p.get_id(): i for i, p in enumerate(portpool.tolist_port())
+			}
+		idx = _dist_state['port_idx']
+		if from_id in idx and to_id in idx:
+			return float(_dist_state['matrix'][idx[from_id], idx[to_id]])
+		return None
+
 	line_names = df['linename'].unique()
-	
+
 	for line_name in line_names:
 		df_line = df[df['linename'] == line_name].sort_values('sequence')
 		
@@ -559,17 +645,37 @@ def read_cnc_proforma_data(portpool: PortPool, vesselpool: VesselPool) -> dict:
 				'port_details': []
 			}
 			
-			# Add per-port operational details
-			for _, row in df_line.iterrows():
+			# Vessel nominal speed: fallback when a leg's recorded speed is a
+			# missing/placeholder value (<= 1 kn).
+			try:
+				_vessel = vesselpool.get_vessel_instance(int(first_row['vrank']))
+				nominal_speed = (_vessel.min_speed + _vessel.max_speed) / 2.0
+			except Exception:
+				nominal_speed = 14.0
+
+			# CHANGE 20/06 (SPEED FIX): normalize each leg's speed to the 10 kn floor
+			# via normalize_leg_speed(). Reason: raw proforma speeds include illegal
+			# sub-10 values; we recompute missing speeds from distance/time and clamp
+			# the rest, banking the saved sailing time into waiting time so the leg
+			# duration (and the schedule) stays unchanged.
+			n_calls = len(port_ids)
+			for j, (_, row) in enumerate(df_line.iterrows()):
+				# Leg runs from this port to the next in the rotation (wraps around).
+				next_port_id = port_ids[(j + 1) % n_calls]
+				leg_distance = _leg_distance(row['portid'], next_port_id)
+				norm_speed, norm_time_to_next, norm_waiting = normalize_leg_speed(
+					row['vspeed'], row['timetonext'], row['time_wait'], nominal_speed,
+					leg_distance=leg_distance
+				)
 				metadata[line_name]['port_details'].append({
 					'port_id': row['portid'],
 					'sequence': int(row['sequence']),
-					'waiting_time': row['time_wait'],
+					'waiting_time': norm_waiting,
 					'maneuvering_in': row['time_manin'],
 					'stay_time': row['staytime'],
 					'maneuvering_out': row['time_manout'],
-					'time_to_next': row['timetonext'],
-					'speed_to_next': row['vspeed'],
+					'time_to_next': norm_time_to_next,
+					'speed_to_next': norm_speed,
 					'moves': row['moves'],
 					'productivity': row['ops_prod'],
 					'allocation': row['alloc'],
@@ -577,6 +683,15 @@ def read_cnc_proforma_data(portpool: PortPool, vesselpool: VesselPool) -> dict:
 					'capacity_reserve': row['cap_reserve'],
 					'ignore_buffer_lb': bool(row.get('ignore_buffer_lb', metadata[line_name]['ignore_buffer_lb']))
 				})
+
+			# Line-level representative speed, consistent with the normalized legs
+			# (sailing-time-weighted average = total distance / total sailing time).
+			_legs = metadata[line_name]['port_details']
+			_total_sail_hrs = sum(d['time_to_next'] for d in _legs)
+			if _total_sail_hrs > 0:
+				metadata[line_name]['speed'] = sum(
+					d['speed_to_next'] * d['time_to_next'] for d in _legs
+				) / _total_sail_hrs
 
 			# Attach buffer-related profile to the service line for later use in optimization
 			waiting_times = [d['waiting_time'] for d in metadata[line_name]['port_details']]
@@ -604,7 +719,24 @@ def read_cnc_proforma_data(portpool: PortPool, vesselpool: VesselPool) -> dict:
 			line.service_type = service_type
 			line.vessel_rank = v_rank
 			line.week = proforma_weeks if proforma_weeks is not None else line.week
-			
+
+			# CHANGE 20/06 (VSA FIX): freeze VSA (partner-operated) lines.
+			# Reason: a Vessel Sharing Agreement is run by a partner; CMA cannot change
+			# its rotation or deployment. Freezing makes MCTS never propose changes to
+			# it, while pinning the weeks (vessel count) keeps its slot capacity fixed
+			# so CMA cargo can still be routed onto it.
+			#
+			# NOTE (fixed 22/06): we deliberately do NOT lock frozen_speed here. Locking
+			# speed adds a hard "speed * time = distance" equality in the MILP that
+			# conflicts with the model's own distance/port-time data and made the solve
+			# INFEASIBLE. A partner's exact cruising speed doesn't affect slot capacity
+			# (capacity = vessel count * class size, both still locked), so we let the
+			# MILP pick a schedule-feasible speed instead.
+			if service_type == 'VSA':
+				line.frozen = True
+				if proforma_weeks is not None and proforma_weeks > 0:
+					line.frozen_weeks = float(max(1, round(proforma_weeks)))
+
 		except Exception as e:
 			# Some ports might not be in portpool, skip those lines
 			# some lines are not valid

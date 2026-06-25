@@ -915,7 +915,8 @@ class ServiceGraph:
 
 		# (3) Create Number of Vessels for Each Line
 		#     V_{ line, rank }
-		ship_vars = cp.Variable(shape=(n_lines, n_vessel_class), name='V', integer=True, nonneg=True)
+		ship_vars = cp.Variable(shape=(n_lines, n_vessel_class), name='V', integer=True)
+		constraints.append(ship_vars >= 0)
 
 		# (4) Create Number of Weeks for Each Line
 		#     N_{ line, n }
@@ -941,6 +942,23 @@ class ServiceGraph:
 				wk_idx_local = int(np.argmin([abs(week_levels[i] - line.frozen_weeks) for i in feasible_week_indices]))
 				wk_idx = feasible_week_indices[wk_idx_local]
 				constraints.append(week_vars[idx_line, wk_idx] == 1)
+
+		# CHANGE 20/06 (VSA FIX): pin vessel class for frozen lines (e.g. VSA) to their
+		# proforma rank. Reason: freezing weeks fixes the ship *count* but the MILP
+		# could still pick a different vessel class, changing the line's capacity.
+		# Forcing all other classes to zero (with the sum_r V == n_weeks identity)
+		# locks the frozen line's deployment so its slot capacity matches reality.
+		for idx_line, line in enumerate(self.__lines_list):
+			if line.frozen and line.vessel_rank is not None:
+				rank_col = next(
+					(i for i, v in enumerate(vesselpool.vessels_list)
+						if v.vessel_rank == line.vessel_rank),
+					None
+				)
+				if rank_col is not None:
+					for r in range(n_vessel_class):
+						if r != rank_col:
+							constraints.append(ship_vars[idx_line, r] == 0)
 
 		# (5) Create Buffer Violation Slack Variables
 		#     s_LB_{line}, s_UB_{line}
@@ -1025,13 +1043,27 @@ class ServiceGraph:
 		# endregion
 
 		# region Objective
+		# CHANGE 20/06 (VSA FIX): exclude VSA (partner-operated) lines from the costs
+		# CMA pays. Reason: the partner owns and runs the vessels, so their chartering,
+		# bunkering and port-call costs are NOT CMA's and would wrongly inflate the
+		# objective. Their transshipment (CMA cargo handling) and capacity stay in.
+		# The per-slot fee CMA pays for cargo on a VSA line is not yet modelled.
+		# TODO(slot-fee): once per-slot/per-TEU VSA pricing is available, add
+		#   slot_rate * (CMA TEU routed on VSA legs) as an objective term here.
+		# `vsa_line_flags` drives the three exclusions below (chartering/bunker/portcall).
+		vsa_line_flags = [line.service_type == 'VSA' for line in self.__lines_list]
+
 		# 1. Weekly Chartering Cost
 		daily_charter_costs = vesselpool.get_chartering_costs()
 		line_chartering_exprs = [
 			7 * (ship_vars[idx_line, :] @ daily_charter_costs)
 			for idx_line in range(n_lines)
 		]
-		expr_chartering = 7 * cp.sum(ship_vars @ daily_charter_costs)
+		expr_chartering = sum(
+			line_chartering_exprs[idx_line]
+			for idx_line in range(n_lines)
+			if not vsa_line_flags[idx_line]
+		)
 		obj_expr += expr_chartering
 
 		# 2. Weekly Transshipment Cost
@@ -1328,6 +1360,12 @@ class ServiceGraph:
 			line_buffer_penalty_lb_exprs.append(line_buffer_penalty_lb_expr)
 			line_buffer_penalty_ub_exprs.append(line_buffer_penalty_ub_expr)
 
+		# CHANGE 20/06 (VSA FIX): exclude VSA lines from the bunkering cost paid by CMA.
+		expr_bunkering = sum(
+			line_bunkering_exprs[idx_line]
+			for idx_line in range(n_lines)
+			if not vsa_line_flags[idx_line]
+		)
 		obj_expr += expr_bunkering
 
 		# 4. Weekly Port Call Cost
@@ -1352,7 +1390,13 @@ class ServiceGraph:
 			constraints.append(aux_portcall_weeks >= -bigM_portcall * line_weeks)
 			constraints.append(aux_portcall_weeks <= line_portcall_cost + bigM_portcall * (1 - line_weeks))
 			constraints.append(aux_portcall_weeks >= line_portcall_cost - bigM_portcall * (1 - line_weeks))
-		
+
+		# CHANGE 20/06 (VSA FIX): exclude VSA lines from the port-call cost paid by CMA.
+		expr_portcall = sum(
+			line_portcall_exprs[idx_line]
+			for idx_line in range(n_lines)
+			if not vsa_line_flags[idx_line]
+		)
 		obj_expr += expr_portcall
 		
 		# 5. Transit Time Penalty
@@ -1835,7 +1879,8 @@ class ServiceGraph:
 
 		# (3) Create Number of Vessels for Each Line
 		#     V_{ line, rank }
-		ship_vars = cp.Variable(shape=(n_lines, n_vessel_class), name='V', integer=True, nonneg=True)
+		ship_vars = cp.Variable(shape=(n_lines, n_vessel_class), name='V', integer=True)
+		constraints.append(ship_vars >= 0)
 		#
 		# endregion
 
@@ -2083,7 +2128,8 @@ class ServiceGraph:
 
 		# (3) Create Number of Vessels for Each Line
 		#     V_{ line, rank }
-		ship_vars = cp.Variable(shape=(n_lines, n_vessel_class), name='V', integer=True, nonneg=True)
+		ship_vars = cp.Variable(shape=(n_lines, n_vessel_class), name='V', integer=True)
+		constraints.append(ship_vars >= 0)
 		#
 		# endregion
 
