@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 
 from .vessel import VesselPool
+from .paths import DATA_DIR
 
 class Port:
 	"""class Port
@@ -152,7 +153,7 @@ class PortPool:
 			return transform(shift_coords, geom)
 
 		MAP_FILE_PATH = '110m_cultural/ne_110m_admin_0_countries.shp'
-		file = resources.files("cma.res").joinpath(MAP_FILE_PATH)
+		file = DATA_DIR.joinpath(MAP_FILE_PATH)
 		geometry = [Point(port.get_location()) for port in self.__port_list]
 		gdf_port = gpd.GeoDataFrame({
 			'Port': [port.get_id() for port in self.__port_list],

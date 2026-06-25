@@ -145,8 +145,6 @@ venv.bak/
 
 # mkdocs documentation
 /site
-/docs
-*.jpg
 *.zip
 verify*
 

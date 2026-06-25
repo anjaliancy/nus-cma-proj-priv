@@ -36,7 +36,7 @@ def test_all_182_ports_in_main_pool():
 	port_pool, _ = read_port_data()
 	
 	# Load reference CSV
-	df = pd.read_csv('src/cma/res/input/Port_Dataset.csv')
+	df = pd.read_csv('data/input/Port_Dataset.csv')
 	expected_count = len(df)
 	
 	actual_count = port_pool.get_number_of_ports()
@@ -57,7 +57,7 @@ def test_cnc_ports_in_finer_pool():
 	port_pool, port_pool_finer = read_port_data()
 	
 	# Load CNC port IDs
-	df_cnc = pd.read_csv('src/cma/res/input/Port_Productivity.csv')
+	df_cnc = pd.read_csv('data/input/Port_Productivity.csv')
 	cnc_port_ids = set(df_cnc['portid'])
 	
 	# Check all CNC ports are in finer pool
@@ -78,7 +78,7 @@ def test_cnc_ports_have_11_ranks():
 	port_pool, port_pool_finer = read_port_data()
 	
 	# Load CNC port IDs
-	df_cnc = pd.read_csv('src/cma/res/input/Port_Productivity.csv')
+	df_cnc = pd.read_csv('data/input/Port_Productivity.csv')
 	cnc_port_ids = set(df_cnc['portid'])
 	
 	# Check each CNC port has data for ranks 1-11
@@ -106,7 +106,7 @@ def test_cnc_ports_have_waiting_and_maneuvering():
 	port_pool, _ = read_port_data()
 	
 	# Load CNC port IDs
-	df_cnc = pd.read_csv('src/cma/res/input/Port_Productivity.csv')
+	df_cnc = pd.read_csv('data/input/Port_Productivity.csv')
 	cnc_port_ids = set(df_cnc['portid'])
 	
 	for port_id in cnc_port_ids:
@@ -140,7 +140,7 @@ def test_legacy_ports_in_finer_pool():
 	port_pool, port_pool_finer = read_port_data()
 	
 	# Load CNC port IDs
-	df_cnc = pd.read_csv('src/cma/res/input/Port_Productivity.csv')
+	df_cnc = pd.read_csv('data/input/Port_Productivity.csv')
 	cnc_port_ids = set(df_cnc['portid'])
 	
 	# Get finer pool ports
@@ -162,7 +162,7 @@ def test_legacy_ports_skip_old_ranks():
 	port_pool, port_pool_finer = read_port_data()
 	
 	# Load CNC port IDs
-	df_cnc = pd.read_csv('src/cma/res/input/Port_Productivity.csv')
+	df_cnc = pd.read_csv('data/input/Port_Productivity.csv')
 	cnc_port_ids = set(df_cnc['portid'])
 	
 	# Get a legacy port with operational data
@@ -191,7 +191,7 @@ def test_legacy_ports_no_waiting_times():
 	port_pool, port_pool_finer = read_port_data()
 	
 	# Load CNC port IDs
-	df_cnc = pd.read_csv('src/cma/res/input/Port_Productivity.csv')
+	df_cnc = pd.read_csv('data/input/Port_Productivity.csv')
 	cnc_port_ids = set(df_cnc['portid'])
 	
 	# Get legacy ports
@@ -235,7 +235,7 @@ def test_dummy_value_handling():
 	port_pool, _ = read_port_data()
 	
 	# Load CSV to find ports with dummy values
-	df = pd.read_csv('src/cma/res/input/Port_Dataset.csv')
+	df = pd.read_csv('data/input/Port_Dataset.csv')
 	
 	dummy_transship = df[df['TranshipmentCost'] == 5000]['PortID'].tolist()
 	dummy_storage = df[df['StorageCost'] == 1000000]['PortID'].tolist()

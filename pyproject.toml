@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cma"
+version = "0.1.0"
+description = "CMA liner shipping network optimization (MCTS + MILP)"
+requires-python = ">=3.10"
+
+# Source lives under src/ (src-layout). Install in editable mode with:
+#   pip install -e .
+# After that, notebooks/scripts can simply `import cma` with no sys.path hacks.
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+# (none) data now lives in the top-level data/ folder, loaded via cma.paths.DATA_DIR

@@ -5,6 +5,7 @@ import random
 from .vessel import Vessel, VesselPool
 from .port import Port, PortPool, PortGraph
 from .serviceline import ServiceLine
+from .paths import DATA_DIR
 
 import pandas as pd
 import numpy as np
@@ -118,7 +119,7 @@ def read_vessel_class_data() -> VesselPool:
 	
 	Note: Unlimited fleet size (fleet availability not constrained)
 	"""
-	file = resources.files('cma.res').joinpath(data_file_vessel)
+	file = DATA_DIR.joinpath(data_file_vessel)
 	df = pd.read_csv(file)
 	df = df.rename(columns=lambda x: x.strip())  # trim titles
 	vessels_list = []
@@ -195,13 +196,13 @@ def read_port_data() -> Tuple[PortPool, PortPool]:
 	port_pool = PortPool()
 	
 	# Step 0: Load APAC port subset (Far East and Oceania)
-	file_apac = resources.files('cma.res').joinpath(data_file_port_apac)
+	file_apac = DATA_DIR.joinpath(data_file_port_apac)
 	df_apac = pd.read_csv(file_apac)
 	df_apac['Region'] = df_apac['Region'].astype(str)
 	apac_port_ids = set(df_apac[df_apac['Region'].str.contains('FAR EAST|OCEANIA', na=False)]['Port_Code'])
 
 	# Step 1: Load basic port data from CSV (all 182 ports)
-	file_basic = resources.files('cma.res').joinpath(data_file_port)
+	file_basic = DATA_DIR.joinpath(data_file_port)
 	df_port = pd.read_csv(file_basic)
 	df_port = df_port.rename(columns=lambda x: x.strip())
 	
@@ -236,10 +237,10 @@ def read_port_data() -> Tuple[PortPool, PortPool]:
 		)
 	
 	# Step 2: Load CNC enhanced operational data (56 ports, 11 vessel ranks)
-	file_productivity = resources.files('cma.res').joinpath(data_file_port_productivity)
-	file_costs = resources.files('cma.res').joinpath(data_file_portcall_costs)
-	file_waiting = resources.files('cma.res').joinpath(data_file_port_waiting)
-	file_maneuvering = resources.files('cma.res').joinpath(data_file_port_maneuvering)
+	file_productivity = DATA_DIR.joinpath(data_file_port_productivity)
+	file_costs = DATA_DIR.joinpath(data_file_portcall_costs)
+	file_waiting = DATA_DIR.joinpath(data_file_port_waiting)
+	file_maneuvering = DATA_DIR.joinpath(data_file_port_maneuvering)
 	
 	df_productivity = pd.read_csv(file_productivity)
 	df_costs = pd.read_csv(file_costs)
@@ -292,7 +293,7 @@ def read_port_data() -> Tuple[PortPool, PortPool]:
 		cnc_ports_processed.add(port_id)
 	
 	# Step 3: Load legacy operational data for non-CNC ports (~126 ports)
-	file_legacy = resources.files('cma.res').joinpath(data_file_port_call)
+	file_legacy = DATA_DIR.joinpath(data_file_port_call)
 	df_legacy_1 = pd.read_excel(file_legacy, sheet_name='Sheet1')
 	df_legacy_2 = pd.read_excel(file_legacy, sheet_name='Sheet2')
 	df_legacy_1 = df_legacy_1.rename(columns=lambda x: x.strip())
@@ -367,7 +368,7 @@ def read_sailing_distance_data(portpool: PortPool) -> np.ndarray:
 	}
 	dist_matrix = np.ones((len(port_mapping), len(port_mapping))) * float('inf')
 
-	file = resources.files('cma.res').joinpath(data_file_sail_distance)
+	file = DATA_DIR.joinpath(data_file_sail_distance)
 	df = pd.read_csv(str(file), low_memory=False)  # read first table
 	df = df.rename(columns=lambda x: x.strip())  # trim titles
 
@@ -380,7 +381,7 @@ def read_sailing_distance_data(portpool: PortPool) -> np.ndarray:
 		# else:
 		#     print(row)
 
-	file_cnc = resources.files('cma.res').joinpath(data_file_sail_distance_cnc)
+	file_cnc = DATA_DIR.joinpath(data_file_sail_distance_cnc)
 	df_cnc = pd.read_excel(file_cnc, sheet_name='Distance Matrix')
 	df_cnc = df_cnc.rename(columns=lambda x: str(x).strip())
 	if 'PORTS' not in df_cnc.columns:
@@ -423,7 +424,7 @@ def read_demand_data(portpool: PortPool) -> tuple[dict, np.ndarray]:
 	total_demands = np.ones((len(port_mapping), len(port_mapping))) * 0.0
 	demands_dict = dict(zip(days, demands))
 
-	file = resources.files('cma.res').joinpath(data_file_demand)
+	file = DATA_DIR.joinpath(data_file_demand)
 	df = pd.read_excel(file, sheet_name="Sheet1")
 	df = df.rename(columns=lambda x: x.strip())  # trim titles
 
@@ -465,7 +466,7 @@ def read_demand_with_transit_time(portpool: PortPool) -> tuple[np.ndarray, np.nd
 	transit_time_matrix = np.zeros((n_ports, n_ports))
 	transit_time_weights = np.zeros((n_ports, n_ports))  # Track weights for averaging
 	
-	file = resources.files('cma.res').joinpath(data_file_demand_cnc)
+	file = DATA_DIR.joinpath(data_file_demand_cnc)
 	df = pd.read_csv(file)
 	df = df.rename(columns=lambda x: x.strip())
 	
@@ -507,12 +508,12 @@ def read_current_line_data(portpool: PortPool,
 	current_lines = []
 	current_lines_weeks = []
 
-	file = resources.files('cma.res').joinpath(data_file_current_line)
+	file = DATA_DIR.joinpath(data_file_current_line)
 	df = pd.read_excel(file, sheet_name='Sheet1')  # read first table
 	df = df.rename(columns=lambda x: x.strip())    # trim titles
 
 	# Load frozen lines details
-	file_detail = resources.files('cma.res').joinpath(data_file_current_line_detail)
+	file_detail = DATA_DIR.joinpath(data_file_current_line_detail)
 	df_detail = pd.read_excel(file_detail)
 	df_detail = df_detail.rename(columns=lambda x: x.strip())
 	detail_dict = df_detail.set_index('Line Name').to_dict('index')
@@ -587,7 +588,7 @@ def read_cnc_proforma_data(portpool: PortPool, vesselpool: VesselPool,
 	- Benchmarking: Assess optimization improvements over current operations
 	- Analysis: Understand CNC service line patterns and constraints
 	"""
-	file = resources.files('cma.res').joinpath(data_file_proforma)
+	file = DATA_DIR.joinpath(data_file_proforma)
 	df = pd.read_csv(file)
 	df = df.rename(columns=lambda x: x.strip())
 	

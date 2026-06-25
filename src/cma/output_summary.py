@@ -285,7 +285,7 @@ def export_milp_output_summary(
 		portgraph: PortGraph,
 		vesselpool: VesselPool,
 		proforma_metadata: dict[str, Any] | None = None,
-		output_path: str | Path = 'src/cma/res/output/milp_output_summary.xlsx',
+		output_path: str | Path = 'data/output/milp_output_summary.xlsx',
 	) -> Path:
 	"""Write the MILP output summary workbook and return its path."""
 	output_path = Path(output_path)

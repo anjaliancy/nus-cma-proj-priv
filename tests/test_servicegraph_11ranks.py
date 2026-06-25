@@ -79,7 +79,7 @@ def test_port_operational_data_for_11_ranks():
 	
 	# Check CNC ports have data for all 11 ranks
 	import pandas as pd
-	df_cnc = pd.read_csv('src/cma/res/input/Port_Productivity.csv')
+	df_cnc = pd.read_csv('data/input/Port_Productivity.csv')
 	cnc_port_ids = set(df_cnc['portid'])
 	
 	# Test a few CNC ports

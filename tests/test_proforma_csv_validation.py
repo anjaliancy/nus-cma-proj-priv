@@ -18,7 +18,7 @@ import numpy as np
 def test_proforma_file_exists():
 	"""Test that proforma_CNC.csv exists"""
 	import os
-	path = 'src/cma/res/input/proforma_CNC.csv'
+	path = 'data/input/proforma_CNC.csv'
 	assert os.path.exists(path), f"Proforma file not found: {path}"
 	
 	print("✓ proforma_CNC.csv exists")
@@ -26,7 +26,7 @@ def test_proforma_file_exists():
 
 def test_proforma_structure():
 	"""Test proforma CSV structure and columns"""
-	df = pd.read_csv('src/cma/res/input/proforma_CNC.csv')
+	df = pd.read_csv('data/input/proforma_CNC.csv')
 	
 	# Expected 22 columns
 	expected_cols = [
@@ -48,7 +48,7 @@ def test_proforma_structure():
 
 def test_proforma_34_service_lines():
 	"""Test that proforma contains 34 unique service lines"""
-	df = pd.read_csv('src/cma/res/input/proforma_CNC.csv')
+	df = pd.read_csv('data/input/proforma_CNC.csv')
 	
 	unique_lines = df['linename'].nunique()
 	assert unique_lines == 34, f"Expected 34 service lines, got {unique_lines}"
@@ -65,7 +65,7 @@ def test_proforma_34_service_lines():
 
 def test_proforma_port_rotations():
 	"""Test that each line has valid port rotation (sequence 1 to N)"""
-	df = pd.read_csv('src/cma/res/input/proforma_CNC.csv')
+	df = pd.read_csv('data/input/proforma_CNC.csv')
 	
 	for line_name in df['linename'].unique():
 		df_line = df[df['linename'] == line_name]
@@ -89,7 +89,7 @@ def test_proforma_port_rotations():
 
 def test_proforma_vessel_ranks():
 	"""Test that vessel ranks are in valid range (1-11)"""
-	df = pd.read_csv('src/cma/res/input/proforma_CNC.csv')
+	df = pd.read_csv('data/input/proforma_CNC.csv')
 	
 	# Get unique vessel ranks used
 	ranks = sorted(df['vrank'].unique())
@@ -111,7 +111,7 @@ def test_proforma_vessel_ranks():
 
 def test_proforma_operational_times():
 	"""Test that operational times are reasonable"""
-	df = pd.read_csv('src/cma/res/input/proforma_CNC.csv')
+	df = pd.read_csv('data/input/proforma_CNC.csv')
 	
 	# Waiting time: 0-168 hours (1 week max)
 	assert (df['time_wait'] >= 0).all(), "Negative waiting time found"
@@ -137,7 +137,7 @@ def test_proforma_operational_times():
 
 def test_proforma_vessel_speeds():
     """Test that vessel speeds are in reasonable ranges."""
-    df = pd.read_csv('src/cma/res/input/proforma_CNC.csv')
+    df = pd.read_csv('data/input/proforma_CNC.csv')
     
     # Speeds should be positive and <= 25 knots
     # Note: Low speeds (1-7 kn) are valid for short hops or harbor movements
@@ -153,7 +153,7 @@ def test_proforma_vessel_speeds():
     print(f"  {ratio*100:.1f}% in typical cruising range (10-18 knots)")
 def test_proforma_vessel_capacities():
 	"""Test that vessel capacities are reasonable"""
-	df = pd.read_csv('src/cma/res/input/proforma_CNC.csv')
+	df = pd.read_csv('data/input/proforma_CNC.csv')
 	
 	# Nominal capacity: 100-20000 TEU
 	assert (df['cap_nom'] >= 100).all(), "Nominal capacity < 100 TEU"
@@ -179,7 +179,7 @@ def test_proforma_vessel_capacities():
 
 def test_proforma_port_productivity():
 	"""Test that port productivity values are reasonable"""
-	df = pd.read_csv('src/cma/res/input/proforma_CNC.csv')
+	df = pd.read_csv('data/input/proforma_CNC.csv')
 	
 	# Productivity (moves per hour): typically 20-150 mph
 	df_with_prod = df[df['ops_prod'] > 0]  # Filter out zero productivity
@@ -208,7 +208,7 @@ def test_proforma_port_productivity():
 
 def test_proforma_capacity_allocation():
 	"""Test that capacity allocation and utilization are reasonable"""
-	df = pd.read_csv('src/cma/res/input/proforma_CNC.csv')
+	df = pd.read_csv('data/input/proforma_CNC.csv')
 	
 	# Allocation: should be positive (no NaN allowed)
 	assert df['alloc'].notna().all(), "NaN allocation found"
@@ -242,7 +242,7 @@ def test_proforma_capacity_allocation():
 
 def test_proforma_service_types():
 	"""Test that service types are valid"""
-	df = pd.read_csv('src/cma/res/input/proforma_CNC.csv')
+	df = pd.read_csv('data/input/proforma_CNC.csv')
 	
 	# Service type should be consistent within each line
 	for line_name in df['linename'].unique():
@@ -261,8 +261,8 @@ def test_proforma_service_types():
 
 def test_proforma_ports_in_dataset():
 	"""Test that proforma ports exist in main Port_Dataset.csv"""
-	df_proforma = pd.read_csv('src/cma/res/input/proforma_CNC.csv')
-	df_ports = pd.read_csv('src/cma/res/input/Port_Dataset.csv')
+	df_proforma = pd.read_csv('data/input/proforma_CNC.csv')
+	df_ports = pd.read_csv('data/input/Port_Dataset.csv')
 	
 	proforma_ports = set(df_proforma['portid'].unique())
 	dataset_ports = set(df_ports['PortID'].unique())
@@ -276,7 +276,7 @@ def test_proforma_ports_in_dataset():
 
 def test_proforma_sample_line():
 	"""Test a sample service line (BBX2CNC) in detail"""
-	df = pd.read_csv('src/cma/res/input/proforma_CNC.csv')
+	df = pd.read_csv('data/input/proforma_CNC.csv')
 	
 	# Get BBX2CNC line
 	df_line = df[df['linename'] == 'BBX2CNC'].sort_values('sequence')

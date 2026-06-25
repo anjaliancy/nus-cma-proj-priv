@@ -21,7 +21,7 @@ from pathlib import Path
 
 def test_cnc_files_exist():
 	"""Test that all 4 CNC operational CSV files exist"""
-	base_path = Path('src/cma/res/input')
+	base_path = Path('data/input')
 	
 	files = [
 		base_path / 'Port_Productivity.csv',
@@ -38,7 +38,7 @@ def test_cnc_files_exist():
 
 def test_port_productivity_structure():
 	"""Test Port_Productivity.csv structure and content"""
-	df = pd.read_csv('src/cma/res/input/Port_Productivity.csv')
+	df = pd.read_csv('data/input/Port_Productivity.csv')
 	
 	# Check columns: portid + ranks 1-11
 	expected_cols = ['portid'] + [str(i) for i in range(1, 12)]
@@ -65,7 +65,7 @@ def test_port_productivity_structure():
 
 def test_portcall_costs_structure():
 	"""Test Portcall_Costs.csv structure and content"""
-	df = pd.read_csv('src/cma/res/input/Portcall_Costs.csv')
+	df = pd.read_csv('data/input/Portcall_Costs.csv')
 	
 	# Check columns: portid + ranks 1-11
 	expected_cols = ['portid'] + [str(i) for i in range(1, 12)]
@@ -96,7 +96,7 @@ def test_portcall_costs_structure():
 
 def test_port_waiting_times_structure():
 	"""Test Port_WaitingTimes.csv structure and content"""
-	df = pd.read_csv('src/cma/res/input/Port_WaitingTimes.csv')
+	df = pd.read_csv('data/input/Port_WaitingTimes.csv')
 	
 	# Check columns: portid + ranks 1-11
 	expected_cols = ['portid'] + [str(i) for i in range(1, 12)]
@@ -118,7 +118,7 @@ def test_port_waiting_times_structure():
 
 def test_port_maneuvering_times_structure():
 	"""Test Port_ManTimes.csv structure and content"""
-	df = pd.read_csv('src/cma/res/input/Port_ManTimes.csv')
+	df = pd.read_csv('data/input/Port_ManTimes.csv')
 	
 	# Check columns: portid, manin, manout
 	expected_cols = ['portid', 'manin', 'manout']
@@ -142,10 +142,10 @@ def test_port_maneuvering_times_structure():
 
 def test_port_consistency_across_files():
 	"""Test that all 4 files have the same 56 ports"""
-	prod = pd.read_csv('src/cma/res/input/Port_Productivity.csv')
-	costs = pd.read_csv('src/cma/res/input/Portcall_Costs.csv')
-	wait = pd.read_csv('src/cma/res/input/Port_WaitingTimes.csv')
-	man = pd.read_csv('src/cma/res/input/Port_ManTimes.csv')
+	prod = pd.read_csv('data/input/Port_Productivity.csv')
+	costs = pd.read_csv('data/input/Portcall_Costs.csv')
+	wait = pd.read_csv('data/input/Port_WaitingTimes.csv')
+	man = pd.read_csv('data/input/Port_ManTimes.csv')
 	
 	prod_ports = set(prod['portid'])
 	costs_ports = set(costs['portid'])
@@ -168,8 +168,8 @@ def test_port_consistency_across_files():
 
 def test_cnc_ports_in_main_dataset():
 	"""Test that CNC ports exist in main Port_Dataset.csv"""
-	cnc_ports = pd.read_csv('src/cma/res/input/Port_Productivity.csv')['portid']
-	main_ports = pd.read_csv('src/cma/res/input/Port_Dataset.csv')['PortID']
+	cnc_ports = pd.read_csv('data/input/Port_Productivity.csv')['portid']
+	main_ports = pd.read_csv('data/input/Port_Dataset.csv')['PortID']
 	
 	cnc_set = set(cnc_ports)
 	main_set = set(main_ports)
@@ -182,10 +182,10 @@ def test_cnc_ports_in_main_dataset():
 
 def test_sample_cnc_port_data():
 	"""Test sample data for a known CNC port (CNSHA - Shanghai)"""
-	prod = pd.read_csv('src/cma/res/input/Port_Productivity.csv')
-	costs = pd.read_csv('src/cma/res/input/Portcall_Costs.csv')
-	wait = pd.read_csv('src/cma/res/input/Port_WaitingTimes.csv')
-	man = pd.read_csv('src/cma/res/input/Port_ManTimes.csv')
+	prod = pd.read_csv('data/input/Port_Productivity.csv')
+	costs = pd.read_csv('data/input/Portcall_Costs.csv')
+	wait = pd.read_csv('data/input/Port_WaitingTimes.csv')
+	man = pd.read_csv('data/input/Port_ManTimes.csv')
 	
 	# Shanghai should be in the dataset
 	assert 'CNSHA' in prod['portid'].values, "Shanghai (CNSHA) not in CNC dataset"

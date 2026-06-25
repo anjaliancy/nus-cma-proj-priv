@@ -1,0 +1,454 @@
+\documentclass[11pt]{article}
+
+% ---------------------------------------------------------------------------
+% Mathematical Formulation: MCTS + MILP for Liner Shipping Network Design
+% Standalone, Overleaf-ready. Compile with pdfLaTeX.
+% ---------------------------------------------------------------------------
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath, amssymb, amsfonts}
+\usepackage{mathtools}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{geometry}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage[colorlinks=true, linkcolor=blue, urlcolor=blue]{hyperref}
+
+\geometry{a4paper, margin=1in}
+
+% Convenience macros
+\newcommand{\Tr}{\mathrm{Tr}}
+\newcommand{\Cap}{\mathrm{Cap}}
+\newcommand{\sail}{\mathrm{sail}}
+\newcommand{\dist}{\mathrm{dist}}
+\newcommand{\PUCB}{\mathrm{PUCB}}
+\newcommand{\UCB}{\mathrm{UCB}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\Z}{\mathbb{Z}}
+\newcommand{\Nat}{\mathbb{N}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Norm}{\mathcal{N}}
+\newcommand{\Uni}{\mathcal{U}}
+\newcommand{\pa}{\mathrm{pa}}
+
+\title{\textbf{Mathematical Formulation:\\ MCTS\,+\,MILP for Liner Shipping Network Design}}
+\author{}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\noindent
+This document compiles the mathematical model that drives the optimisation engine.
+The engine has \textbf{two coupled layers}:
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Outer layer --- Monte Carlo Tree Search (MCTS)} explores the discrete
+  space of \emph{network topologies} (which ports each service line calls, in what
+  order). Each candidate topology is a \emph{state}; each port insertion/deletion is
+  an \emph{action}.
+  \item \textbf{Inner layer --- Mixed-Integer Linear Program (MILP)} evaluates a fixed
+  topology by optimally assigning vessels, speeds, schedules and cargo flows,
+  returning the minimum weekly operating cost. This cost is the \emph{reward signal}
+  that MCTS uses.
+\end{enumerate}
+
+\noindent
+\textit{Notation:} upper-case symbols are decision variables, lower-case symbols are
+data/parameters. Code references point to \texttt{src/cma/mcts.py} and
+\texttt{src/cma/servicegraph.py} (method \texttt{fulfill\_demands}).
+
+\tableofcontents
+\bigskip
+
+% ===========================================================================
+\section{Monte Carlo Tree Search (outer layer)}
+% ===========================================================================
+
+\subsection{State, action, reward}
+\begin{itemize}[leftmargin=*]
+  \item \textbf{State} $s$: a service graph $G$ (set of service lines with their port
+  rotations).
+  \item \textbf{Action} $a$: a \texttt{GraphAction} $(\ell,\textsf{cmd},\textsf{loc})$
+  that adds or deletes a port in line $\ell$. The set of legal actions in state $s$ is
+  $\mathcal{A}(s)$.
+  \item \textbf{Transition}: $s' = T(s,a)$ deterministically applies the action.
+  \item \textbf{Reward} of a state (cost-minimisation mode):
+\end{itemize}
+\begin{equation}
+  r(s) \;=\; \frac{1}{C^\star(s)},
+\end{equation}
+where $C^\star(s)$ is the optimal MILP cost (Section~\ref{sec:milp}) of the topology in
+state $s$. Using the reciprocal turns cost minimisation into reward maximisation, so a
+cheaper network yields a higher reward. (In profit mode $r(s)=\text{profit}^\star(s)$.)
+\textit{Code: \texttt{current\_state\_reward}, \texttt{mcts.py:437}.}
+
+\subsection{Node statistics}
+Each tree node holds a visit count $N(s)$, an accumulated value $W(s)$, and a prior
+probability $P(s)$ (currently uniform; reserved for a future policy network). The mean
+action value is
+\begin{equation}
+  Q(s) \;=\; \frac{W(s)}{N(s)}.
+\end{equation}
+
+\subsection{Selection --- perturbed PUCB}
+Children are selected by a \textbf{Predictor\,+\,Upper-Confidence-Bound (PUCB)} score.
+For a non-root node $s$ with parent $\pa(s)$:
+\begin{equation}
+  \PUCB(s) \;=\; Q(s) \;+\; c_{\text{param}}\, P(s)\,
+  \frac{\sqrt{N(\pa(s))}}{1 + N(s)} .
+\end{equation}
+Two special cases mirror the implementation (\texttt{pucb}, \texttt{mcts.py:418}):
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Unvisited node} ($N(s)=0$): the exploitation term $Q(s)$ is unknown, so
+  it is optimistically sampled from a Gaussian centred on the nearest visited ancestor
+  (``estimated senior'') $\tilde s$:
+  \begin{equation}
+    Q(s) \;\sim\; \Norm\!\big(\mu_{\tilde s},\, c_{\text{param}}\big),
+    \qquad \mu_{\tilde s} = \frac{W(\tilde s)}{N(\tilde s)} .
+  \end{equation}
+  \item \textbf{Root node}: the exploration term is randomised to keep the root
+  ``alive'':
+  \begin{equation}
+    \PUCB(\text{root}) = Q + c_{\text{param}}\,P\cdot
+    \frac{\sqrt{N}}{1+N}\cdot u, \qquad u\sim \Uni(0,\,1.5).
+  \end{equation}
+\end{itemize}
+A classical UCB1 variant is also implemented (\texttt{ucb}, \texttt{mcts.py:409}) as an
+alternative scoring rule:
+\begin{equation}
+  \UCB(s) = Q(s) + c_{\text{param}}\sqrt{\frac{2\ln N(\pa(s))}{N(s)}} .
+\end{equation}
+
+\subsection{Expansion}
+From the selected node, the action with the highest PUCB among \emph{unborn} actions is
+instantiated as a new child. Unborn actions receive the same optimistic surrogate value
+as above:
+\begin{equation}
+  \mathrm{score}(a) = \underbrace{\Norm(\mu_{\tilde s}, c_{\text{param}})}_{\text{surrogate } Q}
+  \;+\; c_{\text{param}}\,P(a)\,\sqrt{N(s)} .
+\end{equation}
+\textit{Code: \texttt{expand}, \texttt{mcts.py:311}.}
+
+\subsection{Rollout (simulation) with geometric discounting}
+\label{sec:rollout}
+This is the distinctive part of the model. Define the \textbf{discount factor}
+$\beta = \texttt{discount\_fac}\in(0,1)$ and the \textbf{total weight}
+\begin{equation}
+  W_{\text{tot}} \;=\; \frac{1}{1-\beta} \;=\; \sum_{i=0}^{\infty}\beta^{i}.
+\end{equation}
+Starting from the node being evaluated, random legal actions are applied, generating a
+trajectory $s_0 \to s_1 \to \dots \to s_m$. The MILP is solved at each visited state.
+The rollout \textbf{stops} after $m$ steps once the truncated geometric mass exceeds a
+target fraction $\rho = \texttt{valid\_weight\_proportion}$:
+\begin{equation}
+  S_m \;=\; \sum_{i=0}^{m}\beta^{i} \;=\; \frac{1-\beta^{m+1}}{1-\beta}
+  \;\ge\; \rho\, W_{\text{tot}} .
+\end{equation}
+The trajectory value is the \textbf{normalised discounted return} of the rewards along
+the path (walking from the leaf $s_m$ back to $s_0$):
+\begin{equation}
+  V \;=\; \frac{W_{\text{tot}}}{S_m}\;\sum_{i=0}^{m}\beta^{\,i}\, r\big(s_{m-i}\big) .
+\end{equation}
+The factor $W_{\text{tot}}/S_m$ renormalises the truncated sum so that a short
+(early-terminated) rollout is comparable to a full-horizon one. This $V$ is added to the
+node's accumulators: $W(s_0)\mathrel{+}= V$, $N(s_0)\mathrel{+}= 1$.
+\textit{Code: \texttt{rollout}, \texttt{mcts.py:224}.}
+
+\subsection{Back-propagation}
+The value is propagated to every ancestor. For each parent the update blends its own
+immediate reward with the discounted child mean value:
+\begin{equation}
+  W(\pa) \;\mathrel{+}=\; r(\pa) \;+\; \beta\,\frac{W(s)}{N(s)},
+  \qquad N(\pa) \;\mathrel{+}=\; 1 .
+\end{equation}
+\textit{Code: \texttt{back\_propagate}, \texttt{mcts.py:292}.}
+
+\subsection{Search loop and final answer}
+One \textbf{search step} $=$ \texttt{select} $\to$ (\texttt{rollout} if leaf unvisited,
+else \texttt{expand}). The tree runs for a fixed number of epochs. The recommended
+network is the descendant with the highest reward $r(s)=1/C^\star(s)$ (equivalently
+lowest MILP cost) found anywhere in the tree:
+\begin{equation}
+  s^\star \;=\; \arg\max_{s\in\text{tree}} r(s)
+  \;=\; \arg\min_{s\in\text{tree}} C^\star(s).
+\end{equation}
+\textit{Code: \texttt{best\_sub\_node}, \texttt{mcts.py:131}; \texttt{MonteCarloTree.run},
+\texttt{mcts.py:495}.}
+
+\begin{table}[h]
+\centering
+\caption{MCTS hyperparameters.}
+\begin{tabular}{@{}clp{7.5cm}@{}}
+\toprule
+Symbol & Code key & Meaning \\
+\midrule
+$\beta$ & \texttt{discount\_fac} & geometric discount on future rewards \\
+$\rho$ & \texttt{valid\_weight\_proportion} & rollout-horizon fraction of $W_{\text{tot}}$ \\
+$c_{\text{param}}$ & \texttt{c\_param} & exploration constant in PUCB/UCB \\
+$D$ & \texttt{max\_depth} & maximum tree depth (root $=0$) \\
+--- & \texttt{MCTS\_EPOCHS} & number of search iterations \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ===========================================================================
+\section{MILP cargo-allocation / fleet-deployment model (inner layer)}
+\label{sec:milp}
+% ===========================================================================
+Solved once per evaluated topology by \texttt{ServiceGraph.fulfill\_demands}. Backend:
+Gurobi via CVXPY (fallbacks: SCIP, GLPK\_MI, ECOS\_BB).
+
+\subsection{Index sets}
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}cl@{}}
+\toprule
+Set & Description \\
+\midrule
+$\ell \in \mathcal{L}$ & service lines \\
+$r \in \mathcal{R}$ & vessel classes (ranks) \\
+$p \in \mathcal{P}$ & ports \\
+$(o,d)\in \mathcal{OD}$ & origin--destination demand pairs \\
+$\pi \in \Pi_{od}$ & candidate paths for pair $(o,d)$ ($\le 3$ transshipments) \\
+$e \in \mathcal{E}_\ell$ & directed legs (segments/slots) of line $\ell$ \\
+$k \in \mathcal{K}$ & discrete round-trip durations in weeks (\texttt{week\_levels}) \\
+$\kappa \in \mathcal{S}$ & discrete speed levels (knots), when speed optimisation is on \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Decision variables}
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}clp{6.3cm}l@{}}
+\toprule
+Variable & Domain & Meaning & Code \\
+\midrule
+$X_{od,\pi}$ & $\ge 0$ & weekly cargo flow (TEU) on path $\pi$ of $(o,d)$ & \texttt{demand\_vars} \\
+$Y_{\ell,e}$ & $\ge 0$ & weekly flow on leg $e$ of line $\ell$ & \texttt{flow\_vars} \\
+$V_{\ell,r}$ & $\Z_{\ge 0}$ & number of class-$r$ vessels on line $\ell$ & \texttt{ship\_vars} \\
+$N_{\ell,k}$ & $\{0,1\}$ & $1$ if line $\ell$ uses a $k$-week round trip & \texttt{week\_vars} \\
+$Z_{\ell,\kappa}$ & $\{0,1\}$ & $1$ if line $\ell$ sails at speed level $\kappa$ (optional) & \texttt{line\_KTS\_vars} \\
+$t_{\ell,p}$ & $\ge 0$ & port-stay days of line $\ell$ at port $p$ & \texttt{matrix\_stay\_days} \\
+$\epsilon_{od}$ & $\ge 0$ & unfulfilled demand slack for $(o,d)$ & \texttt{eps\_vars} \\
+$s^{+}_\ell, s^{-}_\ell$ & $\ge 0$ & buffer-violation slacks ($>30\%$ / $<15\%$) & \texttt{buffer\_violation\_ub/lb} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Derived (linear) expressions}
+\textbf{Transshipment volume} at port $p$ on line $\ell$ --- the cargo loaded/unloaded
+by that line at that port, a linear combination of path flows:
+\begin{equation}
+  \Tr_{\ell,p} \;=\; \sum_{\substack{(o,d),\pi \\ \pi \text{ uses } \ell \text{ at } p}} X_{od,\pi}.
+\end{equation}
+\textbf{Line capacity} (weekly, before dividing by weeks):
+\begin{equation}
+  \Cap_\ell \;=\; \sum_{r} V_{\ell,r}\, \mathrm{cap}_r,
+  \qquad \mathrm{cap}_r=\text{TEU capacity of class }r .
+\end{equation}
+\textbf{Round-trip weeks / vessel count} (one-hot selected): $n_\ell = \sum_k k\,N_{\ell,k}$.
+\textbf{Sailing days} of line $\ell$:
+\begin{equation}
+  \sail_\ell \;=\; 7\sum_k k\,N_{\ell,k} \;-\; \sum_p t_{\ell,p}
+  \;=\; 7\,n_\ell - \sum_p t_{\ell,p} .
+\end{equation}
+
+\subsection{Objective}
+\begin{equation}
+\min \; Z \;=\; \underbrace{Z_{\text{char}}}_{\text{chartering}}
++ \underbrace{Z_{\text{trans}}}_{\text{transship.}}
++ \underbrace{Z_{\text{bunk}}}_{\text{bunker}}
++ \underbrace{Z_{\text{call}}}_{\text{port calls}}
++ \underbrace{Z_{\text{tardy}}}_{\text{transit pen.}}
++ \underbrace{Z_{\text{unmet}}}_{\text{unmet dem.}}
++ \underbrace{Z_{\text{buf}}}_{\text{buffer pen.}} .
+\end{equation}
+
+\paragraph{(1) Chartering cost} ($\gamma_r$ = daily charter rate of class $r$):
+\begin{equation}
+  Z_{\text{char}} \;=\; 7\sum_{\ell}\sum_{r} V_{\ell,r}\,\gamma_r .
+\end{equation}
+
+\paragraph{(2) Transshipment (port-handling) cost} ($\theta_p$ = handling cost/hour at
+port $p$; port-stay days $t_{\ell,p}$ constrained by productivity, see (C6)):
+\begin{equation}
+  Z_{\text{trans}} \;=\; 24\sum_{\ell}\sum_{p} \theta_p\, t_{\ell,p} .
+\end{equation}
+
+\paragraph{(3) Bunker (fuel) cost.} In the simplified mode (default) speed is fixed and
+$\beta^{\text{bunk}}_r$ is the per-vessel weekly bunker rate:
+\begin{equation}
+  Z_{\text{bunk}} \;=\; 7\sum_{\ell}\sum_{r} V_{\ell,r}\,\beta^{\text{bunk}}_r .
+\end{equation}
+In the \textbf{speed-optimisation mode} the rate depends on the chosen speed level
+$\kappa$ via $b_{r,\kappa}$, requiring the bilinear product
+$W^{\text{vs}}_{\ell,r,\kappa}=V_{\ell,r}Z_{\ell,\kappa}$ (linearised in
+Section~\ref{sec:bigm}):
+\begin{equation}
+  Z_{\text{bunk}} \;=\; 7\sum_{\ell}\sum_{r,\kappa} b_{r,\kappa}\, W^{\text{vs}}_{\ell,r,\kappa}.
+\end{equation}
+A soft speed cap multiplies $b_{r,\kappa}$ by \texttt{speed\_penalty\_multiplier} for
+$\kappa$ above \texttt{speed\_soft\_cap\_kts} ($16.5$ kts default).
+
+\paragraph{(4) Port-call cost} ($c_{p,r}$ = call cost of class $r$ at port $p$; cost
+scales inversely with weeks). With per-line call cost
+$c_\ell=\sum_{p\in\ell}\sum_r V_{\ell,r}\,c_{p,r}$:
+\begin{equation}
+  Z_{\text{call}} \;=\; \sum_{\ell}\sum_{k} \frac{1}{k}\, W^{\text{pc}}_{\ell,k},
+  \qquad W^{\text{pc}}_{\ell,k} = c_\ell\, N_{\ell,k}\ \text{(linearised, \S\ref{sec:bigm})}.
+\end{equation}
+
+\paragraph{(5) Transit-time (tardiness) penalty} ($\tau_{od}$ = expected transit time,
+$\hat\tau_\pi$ = estimated path transit time, sailing at $\approx 14$ kts plus
+transshipment waiting; $\lambda^{\text{tt}}$ = penalty per TEU$\cdot$day):
+\begin{equation}
+  Z_{\text{tardy}} \;=\; \lambda^{\text{tt}}\sum_{(o,d)}\sum_{\pi\in\Pi_{od}}
+  \big(\hat\tau_\pi - \tau_{od}\big)^{+} X_{od,\pi}.
+\end{equation}
+
+\paragraph{(6) Unfulfilled-demand penalty} ($\lambda^{\text{u}}$ large):
+\begin{equation}
+  Z_{\text{unmet}} \;=\; \lambda^{\text{u}}\sum_{(o,d)} \epsilon_{od}.
+\end{equation}
+
+\paragraph{(7) Buffer-violation penalty} ($\lambda^{+},\lambda^{-}$ penalise schedule
+buffers outside the $[15\%,30\%]$ band):
+\begin{equation}
+  Z_{\text{buf}} \;=\; \sum_{\ell}\big(\lambda^{+} s^{+}_\ell + \lambda^{-} s^{-}_\ell\big).
+\end{equation}
+
+\subsection{Core constraints}
+\label{sec:constraints}
+
+\paragraph{(C1) Demand fulfilment} (soft lower bound + optional hard cap):
+\begin{equation}
+  \sum_{\pi\in\Pi_{od}} X_{od,\pi} \;\ge\; D_{od} - \epsilon_{od},
+  \qquad \epsilon_{od}\le D_{od},
+  \qquad \Big(\sum_{\pi} X_{od,\pi} \le D_{od}\Big).
+\end{equation}
+
+\paragraph{(C2) Flow coupling} (leg flow must carry the cargo routed over it):
+\begin{equation}
+  Y_{\ell,e} \;\ge\; \sum_{\substack{(o,d),\pi \\ \pi \text{ uses leg } e \text{ of } \ell}} X_{od,\pi}.
+\end{equation}
+
+\paragraph{(C3) Line capacity} (leg flow $\le$ weekly capacity $\Cap_\ell/k$ for the
+selected $k$). Linearised with auxiliary $A_{\ell,k}\approx \Cap_\ell/k$ active only
+when $N_{\ell,k}=1$:
+\begin{align}
+  & Y_{\ell,e} \;\le\; \sum_k A_{\ell,k}\qquad\forall e\in\mathcal{E}_\ell, \\
+  & A_{\ell,k}\le \bar U_k N_{\ell,k},\quad
+    A_{\ell,k}\le \tfrac{\Cap_\ell}{k},\quad
+    A_{\ell,k}\ge \tfrac{\Cap_\ell}{k} - \bar U_k(1-N_{\ell,k}),
+\end{align}
+where $\bar U_k$ is a tight per-week capacity upper bound derived by greedily packing
+the largest vessel classes (\texttt{\_derive\_weekly\_average\_capacity\_upper\_bounds}).
+
+\paragraph{(C4) Week one-hot:} $\sum_k N_{\ell,k}=1$; non-integer week levels forced
+to $0$.
+
+\paragraph{(C5) Vessel identity} (number of ships equals number of weekly round trips):
+\begin{equation}
+  \sum_{r} V_{\ell,r} \;=\; n_\ell \;=\; \sum_k k\,N_{\ell,k}.
+\end{equation}
+
+\paragraph{(C6) Port operations / berthing} (stay days must cover handling work plus a
+$3$-hour minimum berth; $g_p$ = gross productivity TEU/h, $\nu_{\ell,p}$ = number of
+calls):
+\begin{equation}
+  t_{\ell,p} \;\ge\; \frac{\Tr_{\ell,p}}{24\,g_p},
+  \qquad t_{\ell,p} \;\ge\; \nu_{\ell,p}\cdot \tfrac{3}{24},
+  \qquad t_{\ell,p}=0 \ \text{if } g_p=0 .
+\end{equation}
+
+\paragraph{(C7) Speed feasibility} (speed $\times$ time $\approx$ distance;
+$\dist_\ell$ = line round-trip distance). Fixed-speed mode:
+\begin{equation}
+  24\,(\kappa_{\min}-0.5)\,\sail_\ell \;\le\; \dist_\ell
+  \;\le\; 24\,(\kappa_{\max}+0.5)\,\sail_\ell .
+\end{equation}
+Speed-optimisation mode, with $W^{\text{ss}}_{\ell,\kappa}=Z_{\ell,\kappa}\,\sail_\ell$
+and speed step $\Delta$:
+\begin{equation}
+  24\sum_\kappa \big(\kappa+\tfrac{\Delta}{2}\big)\,W^{\text{ss}}_{\ell,\kappa} \ge \dist_\ell,
+  \qquad
+  24\sum_\kappa \big(\kappa-\tfrac{\Delta}{2}\big)\,W^{\text{ss}}_{\ell,\kappa} \le \dist_\ell .
+\end{equation}
+
+\paragraph{(C8) Schedule-buffer band.} The buffer ratio compares slack time to a
+reference $16.5$-kt schedule. With total waiting $T^{\text{wait}}_\ell$ and average
+inverse speed $\bar v^{-1}_\ell$ ($=1/v_\ell$ fixed, or $\sum_\kappa Z_{\ell,\kappa}/\kappa$):
+\begin{equation}
+  \mathrm{num}_\ell = T^{\text{wait}}_\ell + \dist_\ell\Big(\bar v^{-1}_\ell - \tfrac{1}{16.5}\Big),
+  \qquad
+  \mathrm{den}_\ell = 168\, n_\ell .
+\end{equation}
+The ratio $\mathrm{num}_\ell/\mathrm{den}_\ell$ is kept within $[0.15,0.30]$ via soft
+slacks:
+\begin{equation}
+  \mathrm{num}_\ell \le 0.30\,\mathrm{den}_\ell + s^{+}_\ell,
+  \qquad
+  \mathrm{num}_\ell \ge 0.15\,\mathrm{den}_\ell - s^{-}_\ell .
+\end{equation}
+
+\paragraph{(C9) Schedule adherence (tethering, optional).} For each call $k$ on the
+line, the estimated berth time must not exceed the proforma berth time plus a buffer
+$\delta$ (\texttt{schedule\_buffer\_hrs}):
+\begin{equation}
+  \text{eosp}_0 + \frac{\mathrm{cumdist}_k}{\dist_\ell}\,\sail_\ell
+  + \sum_{j<k} t_{\ell,p_j}
+  \;\le\; \text{ETB}^{\text{proforma}}_k + \delta .
+\end{equation}
+
+\subsection{Optional Big-M side constraint}
+\textbf{Transship ship-class restriction} --- if $\Tr_{\ell,p}$ exceeds threshold $A$,
+force at least one vessel of a class no larger than the port's best transshipment class
+$k_p=\arg\max_r g_{p,r}$:
+\begin{equation}
+  \Tr_{\ell,p} - A \le M z,
+  \qquad \sum_{r\le k_p} V_{\ell,r} \;\ge\; z, \qquad z\in\{0,1\}.
+\end{equation}
+
+\subsection{Standard product linearisations (Big-M)}
+\label{sec:bigm}
+Every bilinear term of a (bounded integer/continuous) variable $u$ and a binary
+$\delta$ is replaced by $W=u\,\delta$ with the four McCormick/Big-M inequalities:
+\begin{equation}
+  W \le M\delta,\quad W \ge -M\delta,\quad
+  W \le u + M(1-\delta),\quad W \ge u - M(1-\delta).
+\end{equation}
+This is applied to: the vessel$\times$speed product
+$W^{\text{vs}}=V_{\ell,r}Z_{\ell,\kappa}$, the speed$\times$sail-days product
+$W^{\text{ss}}=Z_{\ell,\kappa}\,\sail_\ell$, the call-cost$\times$week product
+$W^{\text{pc}}=c_\ell N_{\ell,k}$, and the capacity$\times$week product
+$A_{\ell,k}=(\Cap_\ell/k)N_{\ell,k}$.
+
+\subsection{Output}
+The optimal objective $Z^\star = C^\star(s)$ is returned (plus per-line diagnostics and
+KPIs) and becomes the MCTS reward $r(s)=1/C^\star(s)$.
+
+% ===========================================================================
+\section{Coupling of the two layers}
+% ===========================================================================
+\begin{equation}
+\boxed{\;
+\min_{\substack{\text{topology } s \\ \text{(MCTS search)}}}
+\;\; C^\star(s)
+\quad\text{where}\quad
+C^\star(s) = \min_{X,Y,V,N,Z,t,\epsilon,s^\pm}
+\big\{\, Z \ \text{s.t. (C1)--(C9)} \,\big\}.
+\;}
+\end{equation}
+
+\noindent
+MCTS performs the \textbf{combinatorial outer search} over network structures it cannot
+enumerate exhaustively; the MILP performs the \textbf{exact inner optimisation} of
+deployment and routing for each structure. The reciprocal-cost reward, geometric
+rollout discounting, and perturbed PUCB are the three mechanisms that let the outer
+search converge toward low-cost networks within a limited evaluation budget.
+
+\end{document}

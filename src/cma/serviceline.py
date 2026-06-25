@@ -18,6 +18,7 @@ from scgraph.geographs.marnet import marnet_geograph  # type: ignore
 
 from .port import Port, PortPool, PortGraph
 from .vessel import VesselPool
+from .paths import DATA_DIR
 
 class Segment:
 	"""class Segment
@@ -168,7 +169,7 @@ class Path:
 		"""
 		# region
 		MAP_FILE_PATH = '110m_cultural/ne_110m_admin_0_countries.shp'
-		file = resources.files("cma.res").joinpath(MAP_FILE_PATH)
+		file = DATA_DIR.joinpath(MAP_FILE_PATH)
 		world = gpd.read_file(str(file))
 		if not isinstance(world, gpd.GeoDataFrame):
 			raise TypeError(f'file `{file}` invalid')
@@ -905,7 +906,7 @@ class ServiceLine:
 		"""Plot the service line
 		"""
 		MAP_FILE_PATH = '110m_cultural/ne_110m_admin_0_countries.shp'
-		file = resources.files("cma.res").joinpath(MAP_FILE_PATH)
+		file = DATA_DIR.joinpath(MAP_FILE_PATH)
 		world = gpd.read_file(str(file))
 		if not isinstance(world, gpd.GeoDataFrame):
 			raise TypeError(f'file `{file}` invalid')

@@ -92,7 +92,7 @@ def _parse_week_levels(raw: str) -> list[float]:
 
 
 def _read_raw_proforma() -> pd.DataFrame:
-	file = resources.files("cma.res").joinpath(data_file_proforma)
+	file = __import__('pathlib').Path('data').joinpath(data_file_proforma)
 	df = pd.read_csv(file)
 	return df.rename(columns=lambda x: str(x).strip())
 

@@ -11,8 +11,7 @@ from importlib import resources
 # Direct test without full imports
 def test_vessel_data_loads():
     """Test that vessel CSV can be loaded and has correct structure"""
-    import cma.res
-    file = resources.files('cma.res').joinpath('input/Vessel_Nominal.csv')
+    file = __import__('pathlib').Path('data').joinpath('input/Vessel_Nominal.csv')
     df = pd.read_csv(file)
     
     print(f"✓ Loaded {len(df)} vessel classes")
