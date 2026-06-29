@@ -126,8 +126,7 @@ A list of `Port` fact sheets plus convenient ways to find them:
 - **`get_unique_index(port)`** — the position of a port in the list (used a lot,
   because the math works with numbered positions, not names).
 - **`select([ids])`** — make a smaller pool from a chosen set of ports.
-- **`filtered_by_transship_capacity()`** — just the ports that can act as **hubs**
-  (where cargo can switch ships).
+- **`filtered_by_transship_capacity()`** — just the ports that can act as **hubs** (where cargo can switch ships).
 - **`plot(...)`** — draw the ports on a world map.
 
 ### `PortGraph` — the ports PLUS the connections between them
@@ -157,8 +156,7 @@ repeating ship route (the "bus route") — and all the ways to read and edit it.
 
 First, four small helper classes that describe pieces of a route:
 - **`Segment`** — a single hop from one port to the next, e.g. Singapore → Bangkok.
-- **`Slot`** — a Segment that belongs to a *specific* line (it knows which line uses
-  that hop).
+- **`Slot`** — a Segment that belongs to a *specific* line (it knows which line uses that hop).
 - **`Path`** — a sequence of slots that carries cargo from its origin to its
   destination, possibly **switching lines at a hub** along the way (transshipment).
 - **`LineAction`** — an instruction to change a line (e.g. "add a port here").
@@ -178,8 +176,7 @@ Its methods, grouped by what they're for:
 - **Editing the route** — each of these returns a **brand-new line** and leaves the
   original untouched: `insert_port`, `remove_port`, `move_port`, `swap_ports`,
   `shift_port`, `reverse_segment`, `rotate`. `apply_action(...)` runs a `LineAction`.
-- **Finding paths:** `get_shortest_path(a, b)` — the way along this line from port a
-  to port b.
+- **Finding paths:** `get_shortest_path(a, b)` — the way along this line from port a to port b.
 - **Timing:** `set_buffer_profile(...)`, `get_buffer_wait_times()`,
   `set_schedule_profile(...)`, `get_schedule(...)` (works out the berth and
   departure time at each port).
@@ -196,9 +193,7 @@ and how cargo moves along them.
 
 ## 5. `servicegraph.py` — ALL routes together + the cost engine
 
-**What this file is for (one line):** it represents the **whole network** (all the
-service lines at once) and contains the **cost engine** that scores a network:
-*"given these routes, what's the cheapest way to run them and carry all the cargo?"*
+**What this file is for (one line):** it represents the **whole network** (all the service lines at once) and contains the **cost engine** that scores a network: *"given these routes, what's the cheapest way to run them and carry all the cargo?"*
 
 This is the most complex file in the project. Two main classes:
 
@@ -208,13 +203,9 @@ This is the most complex file in the project. Two main classes:
 ### `ServiceGraph` — the network + the engine
 Holds the list of all service lines. Key methods:
 - **`get_feasible_actions(...)`** — lists every valid change the search could make.
-  It **skips frozen / VSA lines** (so partner routes are never modified). *(This is
-  where the VSA "don't touch" rule takes effect.)*
-- **`get_all_paths(...)`** — for every origin→destination with demand, works out the
-  possible ways cargo can travel across the lines (allowing a few transshipments).
-- **`solve_approximated(...)`** — the convenient entry point: it gathers the paths,
-  then calls `fulfill_demands`.
-- **`fulfill_demands(...)`** — **THE big one.** It builds a giant
+  It **skips frozen / VSA lines** (so partner routes are never modified). *(This is where the VSA "don't touch" rule takes effect.)*
+- **`get_all_paths(...)`** — for every origin→destination with demand, works out the possible ways cargo can travel across the lines (allowing a few transshipments).
+- **`solve_approximated(...)`** — the convenient entry point: it gathers the paths,  then calls `fulfill_demands`.  **`fulfill_demands(...)`** — **THE big one.** It builds a giant
   cost-minimization problem and hands it to the solver (Gurobi). It simultaneously
   decides:
   - how many ships of each type to put on each line,
@@ -239,9 +230,7 @@ over to compare different maps.
 
 ## 6. `mcts.py` — the search that designs the routes
 
-**What this file is for (one line):** it's the **smart trial-and-error** that tries
-many possible network changes and homes in on the cheapest ones. MCTS = "Monte
-Carlo Tree Search." It uses the cost engine (`fulfill_demands`) as its scorer.
+**What this file is for (one line):** it's the **smart trial-and-error** that tries many possible network changes and homes in on the cheapest ones. MCTS = "Monte Carlo Tree Search." It uses the cost engine (`fulfill_demands`) as its scorer.
 
 Think of a huge menu of possible route tweaks — far too many to try all of them.
 MCTS samples cleverly: it tries promising changes more, random ones occasionally,
