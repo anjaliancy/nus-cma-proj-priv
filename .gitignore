@@ -185,3 +185,6 @@ EASY_UNDERSTAND.md
 # Gurobi solver run log (kept on disk, not in the repo)
 gurobi.log
 
+# Internal meeting notes (kept on disk, not in the repo)
+docs/CMA CGM Meeting - 2026.06.03.txt
+
