@@ -1521,7 +1521,14 @@ class ServiceGraph:
 		weekly_capacity_upper_bounds = _derive_weekly_average_capacity_upper_bounds(
 			ships_capacities, week_levels, tuneparams
 		)
-		
+		# CHANGE 29/06 (CAPACITY FIX): largest possible total line capacity =
+		# max(week_levels) ships of the largest vessel class. Used as the big-M in the
+		# tight-linearization de-selection branch below (see the comment there).
+		_max_single_vessel_capacity = max(
+			(float(c) for c in ships_capacities if c is not None and c > 0), default=0.0
+		)
+		max_total_line_capacity = max(week_levels) * _max_single_vessel_capacity
+
 		# Constraint: Vessel Identity (Sum of ships == Weeks of roundtrip)
 		# This must hold regardless of speed optimization mode
 		for idx_line in range(n_lines):
@@ -1545,9 +1552,18 @@ class ServiceGraph:
 						constraints.append(aux_C_Wk == 0)
 						continue
 					# Standard linearization for a nonnegative binary-product.
+					# The upper bound (selected week) uses the per-ship average capacity,
+					# which is tight and valid. The DE-SELECTION branch, however, needs a
+					# big-M that dominates the largest possible line_capacity/wk. A line can
+					# run up to max(week_levels) ships of the largest class, so for a
+					# non-selected (small) wk, line_capacity/wk can be many times one
+					# vessel's capacity. Reusing capacity_ub (the per-ship average) here was
+					# the bug: it is far too small, so the constraint below could not be
+					# satisfied for any multi-ship line -> the whole model was INFEASIBLE.
+					deselect_bigM = max_total_line_capacity / wk
 					constraints.append(aux_C_Wk <= capacity_ub * is_wk)
 					constraints.append(aux_C_Wk <= line_capacity / wk)
-					constraints.append(aux_C_Wk >= line_capacity / wk - capacity_ub * (1 - is_wk))
+					constraints.append(aux_C_Wk >= line_capacity / wk - deselect_bigM * (1 - is_wk))
 				else:
 					constraints.append(aux_C_Wk <= bigM_line_capacity * is_wk)
 					constraints.append(aux_C_Wk >= -bigM_line_capacity * is_wk)
