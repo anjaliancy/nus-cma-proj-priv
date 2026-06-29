@@ -182,3 +182,6 @@ cython_debug/
 CONCEPT.md
 EASY_UNDERSTAND.md
 
+# Gurobi solver run log (kept on disk, not in the repo)
+gurobi.log
+
