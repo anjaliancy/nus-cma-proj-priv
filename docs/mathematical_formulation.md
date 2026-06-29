@@ -113,10 +113,14 @@ S_m \;=\; \sum_{i=0}^{m}\beta^{i} \;=\; \frac{1-\beta^{m+1}}{1-\beta}
 $$
 
 The trajectory value is the **normalised discounted return** of the rewards along
-the path (walking from the leaf $s_m$ back to $s_0$):
+the path. The current state $s_0$ carries full weight and each step further into the
+future is discounted by an extra factor $\beta<1$ (the code accumulates this by
+walking from the leaf $s_m$ back to $s_0$, but the weighting is on the *nearer*
+states):
 
 $$
-V \;=\; \frac{W_{\text{tot}}}{S_m}\;\sum_{i=0}^{m}\beta^{\,i}\, r\big(s_{m-i}\big) .
+V \;=\; \frac{W_{\text{tot}}}{S_m}\;\sum_{i=0}^{m}\beta^{\,i}\, r\big(s_{i}\big)
+\;=\; \frac{W_{\text{tot}}}{S_m}\Big(r(s_0) + \beta\,r(s_1) + \dots + \beta^{m}\,r(s_m)\Big).
 $$
 
 The factor $W_{\text{tot}}/S_m$ renormalises the truncated sum so that a short

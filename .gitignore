@@ -181,6 +181,7 @@ cython_debug/
 # Local-only plain-language docs (kept on disk, intentionally not in the repo)
 CONCEPT.md
 EASY_UNDERSTAND.md
+docs/mathematical_formulae_explanation.md
 
 # Gurobi solver run log (kept on disk, not in the repo)
 gurobi.log
