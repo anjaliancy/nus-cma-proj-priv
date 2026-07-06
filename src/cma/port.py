@@ -53,7 +53,7 @@ class Port:
 			transshipment_capacity: bool,
 			max_draft: float,
 			max_daily_call: int,
-			max_line_visit: int=2                  # max number of visits for each line
+			max_line_visit: int=3                  # max number of visits for each line (spec: a port may be visited up to 3x per service)
 	):
 		self.__id = port_id
 		self.__name = name
@@ -250,7 +250,7 @@ class PortPool:
 			transshipment_capacity: bool,
 			max_draft: float,
 			max_daily_call: int,
-			max_line_visit: int=2
+			max_line_visit: int=3
 		):
 		if self.has_port_by_id(port_id):
 			return
