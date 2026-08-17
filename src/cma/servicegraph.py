@@ -229,10 +229,10 @@ class GraphAction:
 	The action looks like: ('line ID', 'add'/'delete', locs)
 	"""
 	idx_line: int
-	cmd: Literal['add', 'delete']
+	cmd: Literal['add', 'delete', 'shift', 'swap']
 	loc: list[int]
 
-	def __init__(self, idx_line: int, cmd: Literal['add', 'delete'], loc: list[int]):
+	def __init__(self, idx_line: int, cmd: Literal['add', 'delete', 'shift', 'swap'], loc: list[int]):
 		self.idx_line = idx_line
 		self.cmd = cmd
 		self.loc = loc
@@ -266,6 +266,19 @@ class GraphAction:
 		else:
 			re: str = f'Action {action_number}:\n'
 		re += f'    For the #{self.idx_line} line "{lines[self.idx_line]}",\n'
+		# CHANGE 14/08: 'shift'/'swap' locs are (line-relative) port POSITIONS, not
+		# port-pool ids like 'add'/'delete' use - so they need their own branch
+		# instead of the shared portgraph.get_port_by_idx lookup below.
+		if self.cmd in ('shift', 'swap'):
+			line_ports = lines[self.idx_line].tolist_port()
+			if self.cmd == 'shift':
+				port_idx, delta = self.loc[0], self.loc[1]
+				port = line_ports[port_idx]
+				re += f'    Shift Port "{port}" (position {port_idx}) by {delta} position(s).'
+			else:
+				idx1, idx2 = self.loc[0], self.loc[1]
+				re += f'    Swap Port "{line_ports[idx1]}" (position {idx1}) with Port "{line_ports[idx2]}" (position {idx2}).'
+			return re
 		start_idx, end_idx, idx_port = self.loc[0], self.loc[1], self.loc[2]
 		start = portgraph.get_port_by_idx(start_idx)
 		end = portgraph.get_port_by_idx(end_idx)
@@ -420,6 +433,35 @@ class ServiceGraph:
 			for action_key, actions in line_actions.items()
 			for action in actions
 		]
+
+		# CHANGE 14/08 (ACTION SPACE FIX): shift_port/swap_ports (serviceline.py) were
+		# written but never called from here, so MCTS could never propose them - only
+		# add/delete (above) were ever reachable. Generating candidates the same way:
+		# try every position pair on each non-frozen line, keep only the ones that
+		# validate. Note: this is O(n^2) validations per line (n = ports on that line),
+		# each building+checking a new ServiceLine - a real added cost per MCTS node,
+		# not yet perf-tuned.
+		for idx_line, line in enumerate(self.__lines_list):
+			if line.frozen:
+				continue
+			n_ports = line.number_of_port()
+			for port_idx in range(n_ports):
+				for delta in range(-(n_ports - 1), n_ports):
+					if delta == 0:
+						continue
+					try:
+						line.shift_port(port_idx, delta, validate=True, portgraph=portgraph)
+					except ValueError:
+						continue
+					actions_list.append(GraphAction(idx_line, 'shift', [port_idx, delta]))
+			for i in range(n_ports):
+				for j in range(i + 1, n_ports):
+					try:
+						line.swap_ports(i, j, validate=True, portgraph=portgraph)
+					except ValueError:
+						continue
+					actions_list.append(GraphAction(idx_line, 'swap', [i, j]))
+
 		return filtered_actions_dict, actions_list
 #
 # endregion
@@ -1543,7 +1585,19 @@ class ServiceGraph:
 
 		# Constraint: (Weekly Line Flow) Y <= (Weekly Line Capacity) C
 		ships_capacities = [s.vessel_capacity for s in vesselpool.vessels_list]
-		line_capacities = ship_vars @ ships_capacities  # shape = (line,)
+		raw_line_capacities = ship_vars @ ships_capacities  # shape = (line,)
+		# CHANGE 13/08 (CAPACITY FIX, client feedback #1 - BBX2/BBX3 inconsistency):
+		# a flat per-rank nominal number was the only capacity ever used here, ignoring
+		# each proforma line's own cap_scale/cap_reserve discounts (see data_reader.py
+		# CHANGE 13/08 for what these mean and the fixed-value assumption applied when
+		# MCTS reassigns a line's vessel rank). Lines with no proforma cap_scale (e.g.
+		# newly-added lines) keep scale=1.0, reserve=0.0, i.e. unchanged behaviour.
+		line_capacity_scale = np.array([
+			line.capacity_scale if line.capacity_scale is not None else 1.0
+			for line in self.__lines_list
+		])
+		line_capacity_reserve = np.array([line.capacity_reserve for line in self.__lines_list])
+		line_capacities = cp.multiply(raw_line_capacities, line_capacity_scale) - line_capacity_reserve
 		use_tight_line_capacity = tuneparams.get('turnon-tight_line_capacity_linearization', 1) > 0.5
 		bigM_line_capacity = tuneparams['BigM-line_capacity']
 		weekly_capacity_upper_bounds = _derive_weekly_average_capacity_upper_bounds(
@@ -1779,9 +1833,14 @@ class ServiceGraph:
 					selected_week = float(week_levels[int(np.argmax(week_choice))])
 				ship_allocation = _solution_vector(ship_vars[idx_line, :], n_vessel_class)
 				vessel_count = float(sum(ship_allocation))
-				line_capacity_total = float(sum(
+				raw_line_capacity_total = float(sum(
 					n_ship * cap for n_ship, cap in zip(ship_allocation, ships_capacities_for_output)
 				))
+				# CHANGE 13/08 (CAPACITY FIX): mirror the same cap_scale/cap_reserve
+				# discount applied in the constraint above, so the reported capacity
+				# matches what was actually enforced during solving.
+				line_scale = line.capacity_scale if line.capacity_scale is not None else 1.0
+				line_capacity_total = raw_line_capacity_total * line_scale - line.capacity_reserve
 				weekly_capacity = line_capacity_total / selected_week if selected_week > 0 else 0.0
 
 				line_sailing_days_val = _solution_float(list_saildays[idx_line], 0.0) or 0.0

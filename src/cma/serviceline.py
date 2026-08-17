@@ -263,6 +263,8 @@ class ServiceLine:
 	frozen_weeks: float | None = None
 	vessel_rank: int | None = None
 	service_type: str = 'OWN'
+	capacity_scale: float | None = None
+	capacity_reserve: float = 0.0
 	anchor_eosp_wd: float | None = None
 	anchor_eosp_hr: float | None = None
 	proforma_leg_durations: list[float] | None = None
@@ -564,6 +566,8 @@ class ServiceLine:
 		target.frozen = self.frozen
 		target.frozen_speed = self.frozen_speed
 		target.frozen_weeks = self.frozen_weeks
+		target.capacity_scale = self.capacity_scale
+		target.capacity_reserve = self.capacity_reserve
 		target._buffer_ignore_lb = self._buffer_ignore_lb
 		# Note: buffer_wait_times and proforma_leg_durations are NOT copied 
 		# because they are sequence-dependent and length-specific.
@@ -678,7 +682,10 @@ class ServiceLine:
 		
 		# Create and validate new service line
 		try:
-			new_line = ServiceLine(self.name(), sequence, _test=not validate, portgraph=portgraph)
+			# CHANGE 14/08: warn=False - now that get_feasible_actions() (servicegraph.py)
+			# actually calls this to probe hundreds of candidates per line, the default
+			# warn=True was printing an "Invalid" line to console for every rejected one.
+			new_line = ServiceLine(self.name(), sequence, _test=not validate, warn=False, portgraph=portgraph)
 			self._copy_metadata_to(new_line)
 			if validate and not new_line.check_valid(warn=False, portgraph=portgraph):
 				raise ValueError(f"Shifting port at index {port_idx} by {delta} creates invalid service line")
@@ -723,7 +730,8 @@ class ServiceLine:
 		
 		# Create and validate new service line
 		try:
-			new_line = ServiceLine(self.name(), sequence, _test=not validate, portgraph=portgraph)
+			# CHANGE 14/08: warn=False, same reason as shift_port above.
+			new_line = ServiceLine(self.name(), sequence, _test=not validate, warn=False, portgraph=portgraph)
 			self._copy_metadata_to(new_line)
 			if validate and not new_line.check_valid(warn=False, portgraph=portgraph):
 				raise ValueError(f"Swapping ports at indices {idx1} and {idx2} creates invalid service line")
@@ -1144,6 +1152,18 @@ class ServiceLine:
 		Input:
 			- `action` has the form (cmd, loc)
 		"""
+		# CHANGE 14/08 (ACTION SPACE FIX): 'shift'/'swap' were previously coded
+		# (shift_port/swap_ports above) but never reachable from get_feasible_actions,
+		# so MCTS could never choose them. Wiring them in now - both methods already
+		# build and validate a new ServiceLine themselves, so return directly instead
+		# of going through the shared sequence-mutation path below.
+		if action.cmd == 'shift':
+			port_idx, delta = action.loc[0], action.loc[1]
+			return self.shift_port(port_idx, delta, validate=not _test, portgraph=portgraph)
+		elif action.cmd == 'swap':
+			idx1, idx2 = action.loc[0], action.loc[1]
+			return self.swap_ports(idx1, idx2, validate=not _test, portgraph=portgraph)
+
 		sequence = self.tolist_port().copy()
 		if action.cmd == 'add':
 			start_idx, end_idx, idx_port = action.loc[0], action.loc[1], action.loc[2]

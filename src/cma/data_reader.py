@@ -721,6 +721,21 @@ def read_cnc_proforma_data(portpool: PortPool, vesselpool: VesselPool,
 			line.vessel_rank = v_rank
 			line.week = proforma_weeks if proforma_weeks is not None else line.week
 
+			# CHANGE 13/08 (CAPACITY FIX, client feedback #1 - BBX2/BBX3 inconsistency):
+			# proforma capacity is not the vessel's flat per-rank nominal number. Two
+			# discounts apply on top of it: cap_scale (a derating factor - cap_nom *
+			# cap_scale == cap_eff in the proforma data, e.g. BBX2: 2822 * 0.9026 = 2547;
+			# meaning/cause not documented anywhere in this repo, only the arithmetic is
+			# confirmed) and cap_reserve (TEUs contractually reserved for external
+			# slotters, e.g. BBX2's 735 TEU matches the client's own stated number
+			# exactly). Assumption: if MCTS reassigns this line to a different vessel
+			# rank, we still apply this proforma line's own cap_scale/cap_reserve to the
+			# new vessel's nominal capacity, i.e. we treat them as fixed per-line values
+			# rather than something that would change with vessel size. Not confirmed
+			# with the client - flagged as an open assumption in the response doc.
+			line.capacity_scale = float(first_row['cap_scale']) if 'cap_scale' in first_row else None
+			line.capacity_reserve = float(first_row['cap_reserve']) if 'cap_reserve' in first_row else 0.0
+
 			# CHANGE 20/06 (VSA FIX): freeze VSA (partner-operated) lines.
 			# Reason: a Vessel Sharing Agreement is run by a partner; CMA cannot change
 			# its rotation or deployment. Freezing makes MCTS never propose changes to
