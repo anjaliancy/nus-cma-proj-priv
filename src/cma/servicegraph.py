@@ -727,6 +727,10 @@ class ServiceGraph:
 				'ctrparam-speed_penalty_multiplier': 2.0,    # multiply fuel cost by this factor above soft cap
 				'ctrparam-transit_penalty_multiplier': 1000.0,  # USD per TEU-day of excess transit time
 				'turnon-demand_fulfillment_cap': 1,          # keep OD fulfillment <= observed demand
+				'turnon-singapore_transship_share': 0,       # SGSIN >= 72.5% of SGSIN/MYPKG/IDJKT transshipment
+				'ctrparam-singapore_transship_share_min': 0.725,
+				'ctrparam-singapore_transship_mode': 'soft', # 'soft' (slack+penalty) or 'hard' (strict constraint)
+				'ctrparam-singapore_transship_penalty': 5000.0,  # USD per TEU of shortfall below the share (soft mode)
 				'BigM-transship': 10000,
 				'BigM-n_ships' : 2,           # at most 2 ships of the same type
 				'BigM-saildays': 64,          # at most 9 weeks, hence less than 64 days
@@ -1145,6 +1149,30 @@ class ServiceGraph:
 					constraints.append(transamount - tuneparams['ctrparam-transship_A'] <= z * tuneparams['BigM-transship'])
 					idf = ports_suitable_v[idx_port]
 					constraints.append(cp.sum(ship_vars[idx_line, : (idf + 1)]) >= z)
+
+		# Singapore transshipment-share rule: SGSIN's transshipment volume must be at
+		# least `ctrparam-singapore_transship_share_min` (default 72.5%) of the combined
+		# SGSIN/MYPKG/IDJKT transshipment volume. 'hard' mode adds a strict constraint
+		# (can make the MILP infeasible); 'soft' mode (default) absorbs any shortfall
+		# with a slack variable penalized in the objective, matching the buffer-violation
+		# pattern used elsewhere in this model.
+		sg_share_tr_sg = None
+		sg_share_tr_group = None
+		sg_share_violation = None
+		sg_share_min = None
+		if tuneparams.get('turnon-singapore_transship_share', 0) > 0.5:
+			sg_my_id_ids = ('SGSIN', 'MYPKG', 'IDJKT')
+			if all(portgraph.has_port_by_id(pid) for pid in sg_my_id_ids):
+				sg_idx, my_idx, id_idx = (portgraph.get_unique_index_by_id(pid) for pid in sg_my_id_ids)
+				sg_share_tr_sg = sum(transshipments[:, sg_idx])
+				sg_share_tr_group = sg_share_tr_sg + sum(transshipments[:, my_idx]) + sum(transshipments[:, id_idx])
+				sg_share_min = tuneparams.get('ctrparam-singapore_transship_share_min', 0.725)
+				if tuneparams.get('ctrparam-singapore_transship_mode', 'soft') == 'hard':
+					constraints.append(sg_share_tr_sg >= sg_share_min * sg_share_tr_group)
+				else:
+					sg_share_violation = cp.Variable(nonneg=True, name='sg_transship_share_violation')
+					constraints.append(sg_share_tr_sg >= sg_share_min * sg_share_tr_group - sg_share_violation)
+					obj_expr += tuneparams.get('ctrparam-singapore_transship_penalty', 5000.0) * sg_share_violation
 
 		# 3. Weekly Bukering Cost
 		expr_bunkering = 0
@@ -1713,6 +1741,18 @@ class ServiceGraph:
 			_solution_float(expr, 0.0) or 0.0
 			for expr in [*line_buffer_penalty_lb_exprs, *line_buffer_penalty_ub_exprs]
 		)
+
+		# Singapore transshipment-share KPIs (None if the rule was turned off)
+		sg_transship_volume = _solution_float(sg_share_tr_sg) if sg_share_tr_sg is not None else None
+		sgmyid_transship_volume = _solution_float(sg_share_tr_group) if sg_share_tr_group is not None else None
+		sg_transship_share = (
+			sg_transship_volume / sgmyid_transship_volume
+			if sg_transship_volume is not None and sgmyid_transship_volume not in (None, 0)
+			else None
+		)
+		sg_transship_share_violation = (
+			_solution_float(sg_share_violation, 0.0) or 0.0 if sg_share_violation is not None else None
+		)
 		transit_penalty_cost = _solution_float(expr_transit_penalty, 0.0) or 0.0
 		unfulfilled_demand_penalty_cost = _solution_float(expr_unfulfilled_demand_penalty, 0.0) or 0.0
 
@@ -1836,6 +1876,10 @@ class ServiceGraph:
 			'kpi_avg_delay_days': avg_delay_days,
 			'kpi_lines_buffer_above_30': lines_buffer_above_30,
 			'kpi_lines_buffer_below_15': lines_buffer_below_15,
+			'kpi_sg_transship_volume': sg_transship_volume,
+			'kpi_sgmyid_transship_volume': sgmyid_transship_volume,
+			'kpi_sg_transship_share': sg_transship_share,
+			'kpi_sg_transship_share_violation': sg_transship_share_violation,
 			'solver_status': prob.status,
 			'solver_name': prob.solver_stats.solver_name,
 			'solver_solve_time': solver_runtime,
