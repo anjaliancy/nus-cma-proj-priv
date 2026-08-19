@@ -7,12 +7,17 @@ These functions consume the solved payload returned by
 
 from __future__ import annotations
 
+import difflib
 from pathlib import Path
 from typing import Any
 import math
 from uuid import uuid4
 
 import pandas as pd
+from openpyxl.cell.rich_text import CellRichText, TextBlock
+from openpyxl.cell.text import InlineFont
+from openpyxl.styles import PatternFill
+from openpyxl.worksheet.worksheet import Worksheet
 
 from .port import PortGraph
 from .serviceline import ServiceLine
@@ -120,6 +125,7 @@ def build_milp_output_summary_dataframe(
 		selected_speed = diag.get('selected_speed_kts')
 		selected_speed = None if selected_speed is None else _finite_float(selected_speed, default=float('nan'))
 		weekly_capacity = _finite_float(diag.get('weekly_capacity_teu'))
+		line_capacity_total = _finite_float(diag.get('line_capacity_total_teu'))
 		ship_allocation = [float(x) for x in diag.get('ship_allocation', [])]
 
 		if selected_speed is not None and math.isfinite(selected_speed) and selected_speed > 0:
@@ -203,7 +209,7 @@ def build_milp_output_summary_dataframe(
 			'linename': line_name,
 			'frozen': meta.get('service_type', 'FIX' if line.frozen else 'OWN'),
 			'vrank': _dominant_rank(ship_allocation),
-			'capacity': weekly_capacity,
+			'capacity': line_capacity_total,
 			'duration': selected_week * 7.0,
 			'vessels': _finite_float(diag.get('vessel_count'), selected_week),
 			'ports': '--'.join(port_ids),
@@ -277,6 +283,127 @@ def build_run_metadata_dataframe(solution: dict[str, Any]) -> pd.DataFrame:
 		'value': 'MILP-only current-network summary; no MCTS modifications included.',
 	})
 	return pd.DataFrame(rows)
+
+
+# Category label -> key in the solved-diagnostics dict (same keys used above in
+# build_run_metadata_dataframe). "System" is the network's total cost.
+CHANGE_SUMMARY_COST_FIELDS = [
+	('Bunkering', 'bunkering cost'),
+	('Chartering', 'chartering cost'),
+	('Port Call', 'portcall cost'),
+	('Transhipment', 'transshipment cost'),
+	('System', 'total cost'),
+]
+
+_REMOVED_FONT = InlineFont(color='FFFF0000', strike=True)
+_ADDED_FONT = InlineFont(color='FF008000')
+
+
+def _line_ports_by_name(service_lines: list[ServiceLine]) -> dict[str, list[str]]:
+	return {
+		line.name(): [port.get_id() for port in line.tolist_port()]
+		for line in service_lines
+	}
+
+
+def _rotation_diff_richtext(baseline_ports: list[str], best_ports: list[str]) -> CellRichText:
+	"""Render one merged rotation: unchanged ports plain, ports dropped from the
+	baseline struck through in red, ports added in the optimised network in green."""
+	matcher = difflib.SequenceMatcher(None, baseline_ports, best_ports)
+	blocks: list[Any] = []
+
+	def add_port(port_id: str, font: InlineFont | None = None) -> None:
+		if blocks:
+			blocks.append(' → ')
+		blocks.append(port_id if font is None else TextBlock(font, port_id))
+
+	for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+		if tag == 'equal':
+			for port_id in baseline_ports[i1:i2]:
+				add_port(port_id)
+		elif tag == 'delete':
+			for port_id in baseline_ports[i1:i2]:
+				add_port(port_id, _REMOVED_FONT)
+		elif tag == 'insert':
+			for port_id in best_ports[j1:j2]:
+				add_port(port_id, _ADDED_FONT)
+		elif tag == 'replace':
+			for port_id in baseline_ports[i1:i2]:
+				add_port(port_id, _REMOVED_FONT)
+			for port_id in best_ports[j1:j2]:
+				add_port(port_id, _ADDED_FONT)
+
+	return CellRichText(*blocks)
+
+
+def build_modified_lines_and_cost_delta(
+		baseline_solution: dict[str, Any],
+		baseline_lines: list[ServiceLine],
+		best_solution: dict[str, Any],
+		best_lines: list[ServiceLine],
+	) -> tuple[list[tuple[str, CellRichText]], list[tuple[str, float, float, float]]]:
+	"""Compare the baseline ("Simulation") and optimised ("Optimisation") networks.
+
+	Returns:
+		modified_lines: (line name, merged rotation rich text) for every line whose
+			port sequence changed.
+		cost_rows: (category label, simulation cost, optimisation cost, delta) for
+			each category in CHANGE_SUMMARY_COST_FIELDS.
+	"""
+	baseline_ports_by_name = _line_ports_by_name(baseline_lines)
+	best_ports_by_name = _line_ports_by_name(best_lines)
+
+	modified_lines = []
+	for name, baseline_ports in baseline_ports_by_name.items():
+		best_ports = best_ports_by_name.get(name)
+		if best_ports is not None and best_ports != baseline_ports:
+			modified_lines.append((name, _rotation_diff_richtext(baseline_ports, best_ports)))
+
+	cost_rows = []
+	for label, key in CHANGE_SUMMARY_COST_FIELDS:
+		sim_cost = _finite_float(baseline_solution.get(key))
+		opt_cost = _finite_float(best_solution.get(key))
+		cost_rows.append((label, sim_cost, opt_cost, opt_cost - sim_cost))
+
+	return modified_lines, cost_rows
+
+
+def write_change_summary_sheet(
+		ws: Worksheet,
+		modified_lines: list[tuple[str, CellRichText]],
+		cost_rows: list[tuple[str, float, float, float]],
+	) -> None:
+	"""Write the 'lines that changed' + cost-delta-by-category layout onto ws."""
+	green_fill = PatternFill(start_color='FFC6EFCE', end_color='FFC6EFCE', fill_type='solid')
+	pink_fill = PatternFill(start_color='FFFFC7CE', end_color='FFFFC7CE', fill_type='solid')
+	eps = 1e-6
+
+	ws.cell(row=1, column=1, value='Lines that were modified')
+	ws.cell(row=1, column=2, value='Port rotation with change')
+	row = 2
+	for name, rotation in modified_lines:
+		ws.cell(row=row, column=1, value=name)
+		ws.cell(row=row, column=2, value=rotation)
+		row += 1
+
+	header_row = row + 2
+	for idx, (label, _) in enumerate(CHANGE_SUMMARY_COST_FIELDS):
+		ws.cell(row=header_row, column=2 + idx, value=label)
+
+	sim_row, opt_row, delta_row = header_row + 1, header_row + 2, header_row + 3
+	ws.cell(row=sim_row, column=1, value='Simulation')
+	ws.cell(row=opt_row, column=1, value='Optimisation')
+	ws.cell(row=delta_row, column=1, value='Delta')
+
+	for idx, (_, sim_cost, opt_cost, delta) in enumerate(cost_rows):
+		col = 2 + idx
+		ws.cell(row=sim_row, column=col, value=sim_cost)
+		ws.cell(row=opt_row, column=col, value=opt_cost)
+		delta_cell = ws.cell(row=delta_row, column=col, value=delta)
+		if delta < -eps:
+			delta_cell.fill = green_fill
+		elif delta > eps:
+			delta_cell.fill = pink_fill
 
 
 def export_milp_output_summary(
