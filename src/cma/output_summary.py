@@ -295,6 +295,31 @@ CHANGE_SUMMARY_COST_FIELDS = [
 	('System', 'total cost'),
 ]
 
+def build_cargo_flow_routes_dataframe(solution: dict[str, Any]) -> pd.DataFrame:
+	"""Build the per-flow, per-path cargo routing sheet (client feedback #7).
+
+	CHANGE 18/08: the solver already computed this (`solution['cargo_flow_routes']`,
+	built in ServiceGraph.fulfill_demands); it just was never written to the output
+	workbook. One row per (origin, destination, path actually used).
+	"""
+	routes = solution.get('cargo_flow_routes') or []
+	if not routes:
+		return pd.DataFrame(columns=[
+			'origin_port', 'destination_port', 'flow_teu',
+			'num_transshipments', 'path_lines', 'path_ports',
+		])
+	rows = [{
+		'origin_port': r['origin_port'],
+		'destination_port': r['destination_port'],
+		'flow_teu': r['flow_teu'],
+		'num_transshipments': r['num_transshipments'],
+		'path_lines': ' -> '.join(r['path_lines']),
+		'path_ports': ' -> '.join(r['path_ports']),
+	} for r in routes]
+	df = pd.DataFrame(rows)
+	return df.sort_values(['origin_port', 'destination_port', 'flow_teu'], ascending=[True, True, False])
+
+
 _REMOVED_FONT = InlineFont(color='FFFF0000', strike=True)
 _ADDED_FONT = InlineFont(color='FF008000')
 
@@ -425,6 +450,7 @@ def export_milp_output_summary(
 		proforma_metadata,
 	)
 	metadata_df = build_run_metadata_dataframe(solution)
+	cargo_flow_routes_df = build_cargo_flow_routes_dataframe(solution)
 
 	temp_path = output_path.with_name(
 		f'.{output_path.stem}.{uuid4().hex}.tmp{output_path.suffix}'
@@ -433,6 +459,7 @@ def export_milp_output_summary(
 		with pd.ExcelWriter(temp_path, engine='openpyxl') as writer:
 			summary_df.to_excel(writer, sheet_name='summary', index=False)
 			metadata_df.to_excel(writer, sheet_name='run_metadata', index=False)
+			cargo_flow_routes_df.to_excel(writer, sheet_name='cargo_flow_routes', index=False)
 		try:
 			temp_path.replace(output_path)
 		except PermissionError as exc:

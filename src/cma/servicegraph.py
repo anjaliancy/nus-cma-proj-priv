@@ -1910,6 +1910,34 @@ class ServiceGraph:
 					'buffer_penalty_cost': line_buffer_penalty_lb + line_buffer_penalty_ub,
 				})
 
+		# CHANGE 18/08 (client feedback #7 - cargo flow routing not exported): the
+		# solver already computes a full per-flow, per-path routing (demand_vars,
+		# below) but nothing decoded it into a readable form - output_summary.py only
+		# ever got aggregated per-segment numbers. Building that readable form here:
+		# one row per (OD pair, path) with nonzero flow, naming the actual ports and
+		# lines the cargo passes through.
+		cargo_flow_routes = []
+		for pair_od, demand_vars_od, paths_od in zip(od_pairs, demand_vars, od_pair_paths):
+			origin_port = portgraph.get_port_by_idx(pair_od[0])
+			dest_port = portgraph.get_port_by_idx(pair_od[1])
+			for path, x_var in zip(paths_od, demand_vars_od):
+				flow_teu = _solution_float(x_var, 0.0) or 0.0
+				if flow_teu <= 1e-6:
+					continue
+				path_lines = []
+				for slot in path.tolist_slot():
+					name = slot.get_service_name()
+					if name not in path_lines:
+						path_lines.append(name)
+				cargo_flow_routes.append({
+					'origin_port': origin_port.get_id(),
+					'destination_port': dest_port.get_id(),
+					'flow_teu': flow_teu,
+					'path_ports': [p.get_id() for p in path.tolist_port()],
+					'path_lines': path_lines,
+					'num_transshipments': max(0, len(path_lines) - 1),
+				})
+
 		return {
 			'total cost': _solution_float(prob.value, math.inf),
 			'chartering cost': _solution_float(expr_chartering, 0.0) or 0.0,
@@ -1921,6 +1949,7 @@ class ServiceGraph:
 			'buffer penalty cost': buffer_penalty_cost,
 			'line diagnostics': line_diagnostics,
 			'demand routes': demand_vars,
+			'cargo_flow_routes': cargo_flow_routes,
 			'line flows': flow_vars,
 			'weeks': week_vars,
 			'ships': ship_vars,
