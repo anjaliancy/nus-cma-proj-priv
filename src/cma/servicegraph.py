@@ -86,6 +86,25 @@ def _derive_weekly_average_capacity_upper_bounds(
 
 	return upper_bounds
 
+def compute_speed_penalty_cap_index(
+		speed_soft_cap: float, speed_level0: float, speed_step: float
+	) -> int:
+	"""Index of the first speed level STRICTLY above `speed_soft_cap` in a speed
+	grid that starts at `speed_level0` and steps by `speed_step`.
+
+	CHANGE 20/08 (client feedback #5a): extracted out of fulfill_demands() so this
+	formula has exactly one implementation - previously a test file (and the
+	inline code) each carried their own copy of a buggy 1kt-step version, and
+	they agreed with each other without ever being correct against the real
+	0.5kt fleet grid.
+
+	Uses floor+1 rather than ceil so that a soft cap sitting exactly on a grid
+	line (16.5kt is on the real 0.5kt grid) still lands strictly above it
+	(17.0kt) instead of resolving to the exact-match level itself.
+	"""
+	return int(np.floor((speed_soft_cap - speed_level0) / speed_step)) + 1
+
+
 def _solution_float(expr, default: float | None = None) -> float | None:
 	"""Return a scalar float from a CVXPY expression, variable slice, or number."""
 	if hasattr(expr, 'value'):
@@ -1230,7 +1249,12 @@ class ServiceGraph:
 		# Apply speed soft cap penalty for speeds > 16.5 kts
 		speed_soft_cap = tuneparams.get('ctrparam-speed_soft_cap_kts', 16.5)
 		penalty_mult = tuneparams.get('ctrparam-speed_penalty_multiplier', 2.0)
-		cap_index = int(np.ceil(speed_soft_cap - speed_level0))  # First speed level > soft cap
+		# CHANGE 20/08 (client feedback #5a): the old inline formula
+		# `ceil(speed_soft_cap - speed_level0)` assumed a 1kt step between speed
+		# levels; the real fleet grid steps in 0.5kt increments, so it was picking
+		# a list position ~2x too early (13.5kt instead of 17.0kt). See
+		# compute_speed_penalty_cap_index() above for the corrected formula.
+		cap_index = compute_speed_penalty_cap_index(speed_soft_cap, speed_level0, speed_step)
 		if cap_index < n_speed_level:
 			daily_bukering_cost_rates = daily_bukering_cost_rates.copy()
 			daily_bukering_cost_rates[:, cap_index:] *= penalty_mult
