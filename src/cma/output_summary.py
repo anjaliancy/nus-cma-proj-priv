@@ -8,6 +8,7 @@ These functions consume the solved payload returned by
 from __future__ import annotations
 
 import difflib
+from collections import deque
 from pathlib import Path
 from typing import Any
 import math
@@ -172,12 +173,47 @@ def build_milp_output_summary_dataframe(
 			for port in ports:
 				opstime.append(fallback_opstime_for_port(port))
 
-		if port_details and len(port_details) == len(ports):
-			waittime = [_finite_float(item.get('waiting_time')) for item in port_details]
-			mantime = [
-				_finite_float(item.get('maneuvering_in')) + _finite_float(item.get('maneuvering_out'))
-				for item in port_details
-			]
+		if port_details:
+			# CHANGE 23/08 (client feedback #2/#3 - BMX wait/man times showing 0
+			# after JPYOK was added): match each of the line's CURRENT ports to its
+			# proforma record by port_id, not by list position. Position-matching
+			# broke as soon as MCTS added/removed/shifted a port, since the
+			# proforma list's length (and order) no longer lines up with the
+			# current rotation - the old code then zeroed out every port on the
+			# whole line, not just the changed one. A port can be called more than
+			# once in a rotation, so match occurrences in original sequence order
+			# via a per-port_id queue rather than a plain dict.
+			detail_queues: dict[str, deque] = {}
+			for detail in sorted(port_details, key=lambda d: d.get('sequence', 0)):
+				detail_queues.setdefault(detail.get('port_id'), deque()).append(detail)
+
+			waittime = []
+			mantime = []
+			for port in ports:
+				queue = detail_queues.get(port.get_id())
+				detail = queue.popleft() if queue else None
+				if detail is not None:
+					waittime.append(_finite_float(detail.get('waiting_time')))
+					mantime.append(
+						_finite_float(detail.get('maneuvering_in')) + _finite_float(detail.get('maneuvering_out'))
+					)
+				else:
+					# No proforma record for this port on this line (MCTS added it
+					# new). Fall back to the port's own real operational data where
+					# it exists (56 of 182 ports have measured wait/man times);
+					# otherwise a generic placeholder, same default used elsewhere
+					# in the codebase (serviceline.py's get_schedule()).
+					wait_by_rank = getattr(port, 'waiting_time', None) or {}
+					if dominant_rank is not None and dominant_rank in wait_by_rank:
+						waittime.append(_finite_float(wait_by_rank[dominant_rank]))
+					elif wait_by_rank:
+						waittime.append(_finite_float(sum(wait_by_rank.values()) / len(wait_by_rank)))
+					else:
+						waittime.append(2.0)
+					mantime.append(
+						_finite_float(getattr(port, 'maneuvering_time_in', 3.0))
+						+ _finite_float(getattr(port, 'maneuvering_time_out', 3.0))
+					)
 		else:
 			wait_profile = line.get_buffer_wait_times() or [0.0 for _ in ports]
 			waittime = [_finite_float(x) for x in wait_profile[:len(ports)]]
