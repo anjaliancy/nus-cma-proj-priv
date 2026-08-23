@@ -995,9 +995,9 @@ class ServiceGraph:
 		if len(feasible_week_indices) == 0:
 			raise ValueError('No feasible integer week levels remain after filtering.')
 
-		# Fix weeks for frozen lines
+		# Fix weeks for frozen lines (rank/weeks lock only, e.g. VSA - not FIX)
 		for idx_line, line in enumerate(self.__lines_list):
-			if line.frozen and line.frozen_weeks is not None:
+			if line.frozen_rank_weeks and line.frozen_weeks is not None:
 				if not _is_integral_week_level(line.frozen_weeks):
 					raise ValueError(
 						f'Frozen line "{line.name()}" requires non-integer weeks={line.frozen_weeks}, '
@@ -1014,7 +1014,7 @@ class ServiceGraph:
 		# Forcing all other classes to zero (with the sum_r V == n_weeks identity)
 		# locks the frozen line's deployment so its slot capacity matches reality.
 		for idx_line, line in enumerate(self.__lines_list):
-			if line.frozen and line.vessel_rank is not None:
+			if line.frozen_rank_weeks and line.vessel_rank is not None:
 				rank_col = next(
 					(i for i, v in enumerate(vesselpool.vessels_list)
 						if v.vessel_rank == line.vessel_rank),
@@ -2022,9 +2022,9 @@ class ServiceGraph:
 		# predict weeks
 		week_vars = apply_prediction(model, self.__lines_list, portgraph, vesselpool)
 		
-		# Override weeks for frozen lines
+		# Override weeks for frozen lines (rank/weeks lock only, e.g. VSA - not FIX)
 		for idx_line, line in enumerate(self.__lines_list):
-			if line.frozen and line.frozen_weeks is not None:
+			if line.frozen_rank_weeks and line.frozen_weeks is not None:
 				week_vars[idx_line] = line.frozen_weeks
 
 		for week in week_vars:

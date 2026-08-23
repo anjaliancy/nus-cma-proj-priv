@@ -748,8 +748,16 @@ def read_cnc_proforma_data(portpool: PortPool, vesselpool: VesselPool,
 			# INFEASIBLE. A partner's exact cruising speed doesn't affect slot capacity
 			# (capacity = vessel count * class size, both still locked), so we let the
 			# MILP pick a schedule-feasible speed instead.
-			if service_type == 'VSA':
+			# CHANGE 20/08 (FIX-LINE FREEZE FIX, client feedback follow-up): 'frozen'
+			# used to be set only for VSA and to mean three things at once (topology,
+			# rank, weeks locked). FIX lines are fully CNC-operated but with a fixed
+			# port rotation - unlike VSA, their rank/weeks/speed should stay
+			# optimisable. Split into 'frozen' (topology-only, both VSA and FIX) and
+			# 'frozen_rank_weeks' (VSA only).
+			if service_type in ('VSA', 'FIX'):
 				line.frozen = True
+			if service_type == 'VSA':
+				line.frozen_rank_weeks = True
 				if proforma_weeks is not None and proforma_weeks > 0:
 					line.frozen_weeks = float(max(1, round(proforma_weeks)))
 

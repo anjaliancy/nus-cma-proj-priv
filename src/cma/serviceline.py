@@ -259,6 +259,7 @@ class ServiceLine:
 	__line: list[Port]
 	week: float = 999999.0
 	frozen: bool = False
+	frozen_rank_weeks: bool = False
 	frozen_speed: float | None = None
 	frozen_weeks: float | None = None
 	vessel_rank: int | None = None
@@ -564,6 +565,7 @@ class ServiceLine:
 		target.vessel_rank = self.vessel_rank
 		target.service_type = self.service_type
 		target.frozen = self.frozen
+		target.frozen_rank_weeks = self.frozen_rank_weeks
 		target.frozen_speed = self.frozen_speed
 		target.frozen_weeks = self.frozen_weeks
 		target.capacity_scale = self.capacity_scale
