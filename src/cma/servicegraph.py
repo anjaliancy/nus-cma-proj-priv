@@ -272,6 +272,29 @@ class GraphAction:
 	def get_line_name(self, servicegraph: 'ServiceGraph') -> str:
 		return servicegraph.tolist_serviceLine()[self.idx_line].name()
 
+	def get_new_port_call_idx(self, new_line: 'ServiceLine', portgraph: PortGraph) -> int | None:
+		"""CHANGE 23/08 (client feedback #6 - zero-cargo port additions): for an
+		'add' action, find the port-call index of the newly-inserted port within
+		`new_line` (the line after this action was applied), so callers can look
+		up how much cargo that specific stop moved. Mirrors the exact start/end
+		matching ServiceLine.apply_action() itself uses to insert the port, so
+		this finds the occurrence that was actually added - not just any
+		occurrence of that port_id already elsewhere in the rotation. Returns
+		None for non-'add' actions, or if no match is found.
+		"""
+		if self.cmd != 'add':
+			return None
+		start_idx, end_idx, idx_port = self.loc
+		start = portgraph.get_port_by_idx(start_idx)
+		end = portgraph.get_port_by_idx(end_idx)
+		port = portgraph.get_port_by_idx(idx_port)
+		for idx in range(new_line.number_of_port()):
+			if (new_line.get_port_by_idx(idx) == port
+					and new_line.prev_port_of_idx(idx) == start
+					and new_line.next_port_of_idx(idx) == end):
+				return idx
+		return None
+
 	def get_line_action(self, serviceline: ServiceLine, portgraph: PortGraph) -> LineAction:
 		return LineAction(self.cmd, self.loc)
 

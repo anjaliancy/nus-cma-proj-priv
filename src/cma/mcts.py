@@ -15,7 +15,50 @@ from statsmodels.regression.linear_model import RegressionResultsWrapper
 
 from .vessel import VesselPool
 from .port import PortGraph
+from .serviceline import ServiceLine
 from .servicegraph import ServiceGraph, GraphAction # type: ignore
+
+
+# CHANGE 23/08 (client feedback #6 - zero-cargo port additions): MCTS could
+# freely add a port to a line even if the solved network routes zero cargo
+# through it (e.g. CNCWN added to CP2, MYLBU added to YCX - both with 0
+# filling-factor change and 0 ops time). Route-shape validation alone can't
+# catch this - it's a property of the solve's cargo-routing decision, not the
+# rotation shape - so this check only runs after a node's first solve, using
+# the per-port-call cargo numbers the solver already produces.
+_ZERO_CARGO_TOLERANCE_TEU = 1e-6
+
+
+def _is_zero_cargo_add(new_line: ServiceLine, action: GraphAction, portgraph: PortGraph, sol: dict) -> bool:
+	"""True if `action` is an 'add' whose newly-inserted port moved (loaded,
+	discharged, or transshipped) essentially zero cargo in the solve `sol`.
+	"""
+	idx_call = action.get_new_port_call_idx(new_line, portgraph)
+	if idx_call is None:
+		return False
+	diagnostics = sol.get('line diagnostics') or []
+	if action.idx_line >= len(diagnostics):
+		return False
+	port_call_moves = diagnostics[action.idx_line].get('port_call_moves') or []
+	if idx_call >= len(port_call_moves):
+		return False
+	moves_teu = float(port_call_moves[idx_call].get('moves_teu', 0.0) or 0.0)
+	return abs(moves_teu) < _ZERO_CARGO_TOLERANCE_TEU
+
+
+def _reject_child_as_invalid(parent: 'MonteCarloTreeSearchNode', action: GraphAction,
+		child: 'MonteCarloTreeSearchNode') -> None:
+	"""Detach `child` from `parent` and mark `action` invalid, so MCTS never
+	proposes this exact zero-cargo addition again - same treatment an invalid
+	route shape already gets in add_child().
+	"""
+	if child in parent.children:
+		idx = parent.children.index(child)
+		del parent.children[idx]
+		del parent.borns[idx]
+	if action not in parent.invalid_actions:
+		parent.invalid_actions.append(action)
+		parent.number_legal_actions = max(0, parent.number_legal_actions - 1)
 
 
 class MonteCarloTreeSearchNode:
@@ -244,8 +287,20 @@ class MonteCarloTreeSearchNode:
 			solve_kwargs['week_levels'] = week_levels
 		if milp_tuneparams is not None:
 			solve_kwargs['tuneparams_2'] = milp_tuneparams
-		self.graph.solve_approximated(portgraph, vesselpool,
+		sol = self.graph.solve_approximated(portgraph, vesselpool,
 				week_predictor=week_predictor, min_cost=self.min_cost, **solve_kwargs)
+
+		# CHANGE 23/08 (client feedback #6): if this node was born from an 'add'
+		# action that turned out to move zero cargo, reject it outright - detach
+		# it from its parent and blacklist the action - instead of letting it
+		# stay in the tree as a normal (if unappealing) option. Leaves
+		# self.number_of_visits at 0, which search_step() uses as the signal to
+		# skip back_propagate() for a rejected node.
+		if self.parent is not None and self in self.parent.children:
+			born_action = self.parent.borns[self.parent.children.index(self)]
+			if sol is not None and _is_zero_cargo_add(self.graph.tolist_serviceLine()[born_action.idx_line], born_action, portgraph, sol):
+				_reject_child_as_invalid(self.parent, born_action, self)
+				return
 
 		# create a temporary root node whose parent is None
 		tmp_root = MonteCarloTreeSearchNode(self.graph, portgraph, self.prior_prob, self.min_cost, None)
@@ -265,13 +320,19 @@ class MonteCarloTreeSearchNode:
 			the_action = all_actions[rand_idx]
 			the_prior = all_probs[rand_idx]
 			# Add `child_node` to `the_node`
-			child_node = the_node.add_child(the_action, portgraph, the_prior, 999999)
+			parent_node = the_node
+			child_node = parent_node.add_child(the_action, portgraph, the_prior, 999999)
 			if child_node is None:
 				continue
 
-			the_node: MonteCarloTreeSearchNode = child_node
-			the_node.graph.solve_approximated(portgraph, vesselpool,
+			child_sol = child_node.graph.solve_approximated(portgraph, vesselpool,
 					week_predictor=week_predictor, min_cost=self.min_cost, **solve_kwargs)
+			if child_sol is not None and _is_zero_cargo_add(
+					child_node.graph.tolist_serviceLine()[the_action.idx_line], the_action, portgraph, child_sol):
+				_reject_child_as_invalid(parent_node, the_action, child_node)
+				continue
+
+			the_node: MonteCarloTreeSearchNode = child_node
 			# Check stopping
 			sum_weight *= discount_fac
 			sum_weight += 1
@@ -387,7 +448,13 @@ class MonteCarloTreeSearchNode:
 			c.rollout(
 				portgraph, vesselpool, discount_fac, valid_weight_proportion,
 				week_predictor, week_levels, milp_tuneparams)
-			c.back_propagate(discount_fac)
+			# CHANGE 23/08 (client feedback #6): rollout() returns early, leaving
+			# number_of_visits at 0, when it rejects `c` as a zero-cargo port
+			# addition. back_propagate() divides by number_of_visits, so it must
+			# be skipped for a rejected node - there's nothing to propagate for a
+			# node that's already been detached from the tree.
+			if c.number_of_visits > 0:
+				c.back_propagate(discount_fac)
 			if recorder is not None:
 				recorder['num_rollout'] += 1
 				if display:
