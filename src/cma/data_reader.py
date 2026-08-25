@@ -733,8 +733,22 @@ def read_cnc_proforma_data(portpool: PortPool, vesselpool: VesselPool,
 			# new vessel's nominal capacity, i.e. we treat them as fixed per-line values
 			# rather than something that would change with vessel size. Not confirmed
 			# with the client - flagged as an open assumption in the response doc.
-			line.capacity_scale = float(first_row['cap_scale']) if 'cap_scale' in first_row else None
-			line.capacity_reserve = float(first_row['cap_reserve']) if 'cap_reserve' in first_row else 0.0
+			# CHANGE 24/08 (bug found while investigating client feedback #5b):
+			# 10 VSA lines (e.g. CS1CNC) have cap_scale/cap_reserve present as
+			# columns but NaN as values (missing data), not simply absent
+			# columns. float(nan) is nan, not None - which slipped past
+			# servicegraph.py's existing "capacity_scale is None -> default to
+			# 1.0" fallback and fed a NaN straight into the capacity constraint,
+			# crashing the solver ("Element of a double array is Nan or Inf").
+			# Treat a NaN value the same as a missing column.
+			_raw_cap_scale = first_row.get('cap_scale')
+			line.capacity_scale = (
+				float(_raw_cap_scale) if _raw_cap_scale is not None and not pd.isna(_raw_cap_scale) else None
+			)
+			_raw_cap_reserve = first_row.get('cap_reserve')
+			line.capacity_reserve = (
+				float(_raw_cap_reserve) if _raw_cap_reserve is not None and not pd.isna(_raw_cap_reserve) else 0.0
+			)
 
 			# CHANGE 20/06 (VSA FIX): freeze VSA (partner-operated) lines.
 			# Reason: a Vessel Sharing Agreement is run by a partner; CMA cannot change
