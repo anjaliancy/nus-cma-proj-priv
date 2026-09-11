@@ -182,6 +182,9 @@ cython_debug/
 CONCEPT.md
 EASY_UNDERSTAND.md
 docs/mathematical_formulae_explanation.md
+docs/ts_swap_analysis.md
+docs/ts_swap_changes_todo.md
+docs/cma_changes_todo_0607.md
 WEEKEND_SUMMARY*.md
 FULL_RUN_RESULTS.md
 
