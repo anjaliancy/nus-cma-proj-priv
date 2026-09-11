@@ -269,9 +269,20 @@ class ServiceLine:
 	anchor_eosp_wd: float | None = None
 	anchor_eosp_hr: float | None = None
 	proforma_leg_durations: list[float] | None = None
+	# CHANGE 09/09 (client feedback, VSA speed mismatch): per-port manoeuvring
+	# time (manin + manout, in hours) from the proforma. The cycle splits into
+	# sailing + stay + waiting + manoeuvring; the MILP's sailing-days formula was
+	# only subtracting stay, so waiting + manoeuvring were being counted as
+	# sailing time and dragging every VSA line's implied speed below the
+	# published figure. See docs/vsa_speed_stay_investigation_2026-09-09.md.
+	proforma_manoeuvre_times: list[float] | None = None
 	_buffer_wait_times: list[float] | None
 	_buffer_speeds_to_next: list[float] | None
 	_buffer_ignore_lb: bool
+	# CHANGE 09/09 (client feedback, VSA port-stay-time experiment): published
+	# per-port stay time (days), used to softly pull the MILP's own stay-days
+	# decision variable back toward the real schedule instead of leaving it free.
+	frozen_stay_days: list[float] | None = None
 
 	def __init__(self, name: str, line: list[Port], _test: bool=False, verbose=False, warn=True, portgraph: PortGraph | None = None):
 		self.__name = name
@@ -279,6 +290,7 @@ class ServiceLine:
 		self._buffer_wait_times = None
 		self._buffer_speeds_to_next = None
 		self._buffer_ignore_lb = False
+		self.frozen_stay_days = None
 		self.service_type = 'OWN'
 
 		if (not _test) and False is self.check_valid(warn, portgraph=portgraph):
@@ -423,6 +435,21 @@ class ServiceLine:
 		return self._buffer_ignore_lb
 
 	###########################################################################
+	# Stay-time profile helper (published per-port stay days, EXPERIMENTAL)
+	###########################################################################
+	def set_stay_days_profile(self, stay_days: list[float] | None):
+		"""Attach proforma-derived per-port stay time (in days) to the service
+		line. Used only to softly pull the MILP's stay-days decision variable
+		toward the real schedule (client feedback, 2026-09-09) - not wired into
+		any hard constraint."""
+		if stay_days is not None and len(stay_days) != self.number_of_port():
+			raise ValueError("stay_days length must match number of ports")
+		self.frozen_stay_days = stay_days
+
+	def get_stay_days_profile(self) -> list[float] | None:
+		return self.frozen_stay_days
+
+	###########################################################################
 	# Schedule profile helpers (anchor EOSP, proforma leg durations)
 	###########################################################################
 	def set_schedule_profile(self,
@@ -445,6 +472,31 @@ class ServiceLine:
 
 	def get_proforma_leg_durations(self) -> list[float] | None:
 		return self.proforma_leg_durations
+
+	def set_manoeuvre_times(self, manoeuvre_times: list[float] | None):
+		"""Attach proforma-derived per-port manoeuvring time (manin + manout, in
+		hours). Used by the sailing-days formula so waiting + manoeuvring time is
+		not mistaken for sailing time (client feedback, 2026-09-09)."""
+		if manoeuvre_times is not None and len(manoeuvre_times) != self.number_of_port():
+			raise ValueError("manoeuvre_times length must match number of ports")
+		self.proforma_manoeuvre_times = manoeuvre_times
+
+	def get_manoeuvre_times(self) -> list[float] | None:
+		return self.proforma_manoeuvre_times
+
+	def get_fixed_nonsail_hours(self) -> float:
+		"""Total per-cycle time (hours) that is neither sailing nor port stay:
+		waiting + manoeuvring, summed over the rotation. Returns 0.0 when the
+		line has no proforma profile (e.g. MCTS-created lines), leaving the
+		sailing-days formula unchanged for those."""
+		wait_times = self._buffer_wait_times
+		man_times = self.proforma_manoeuvre_times
+		total = 0.0
+		if wait_times is not None:
+			total += float(sum(wait_times))
+		if man_times is not None:
+			total += float(sum(man_times))
+		return total
 
 	def get_schedule(self, portgraph: PortGraph, vesselpool: VesselPool | None = None) -> list[tuple[float, float]]:
 		"""
@@ -571,8 +623,8 @@ class ServiceLine:
 		target.capacity_scale = self.capacity_scale
 		target.capacity_reserve = self.capacity_reserve
 		target._buffer_ignore_lb = self._buffer_ignore_lb
-		# Note: buffer_wait_times and proforma_leg_durations are NOT copied 
-		# because they are sequence-dependent and length-specific.
+		# Note: buffer_wait_times, proforma_leg_durations and frozen_stay_days are
+		# NOT copied because they are sequence-dependent and length-specific.
 
 	def last_index_of_port(self, port: Port) -> int:
 		"""The last index of a port in a service line

@@ -1183,7 +1183,24 @@ class ServiceGraph:
 					port = portgraph.get_port_by_idx(idx_port)
 					gross_prod = ports_gross_prod[idx_port]
 					min_berthing_days = port_call_counts[idx_line, idx_port] * (3.0 / 24.0)
-					
+
+					# CHANGE 09/09 (client feedback, VSA speed/distance mismatch
+					# investigation): a line can only accrue port-stay time at ports
+					# on its own rotation. Without this, matrix_stay_days was left
+					# with only a >= 0 lower bound at ports the line never calls
+					# (transshipments and min-berthing are both 0 there), so the
+					# solver was free to inflate that phantom stay time. It then fed
+					# into line_sailing_days = 7*weeks - sum(stay), shrinking sailing
+					# days and pulling the implied speed below the published VSA
+					# speed. Pinning these entries to 0 is the permanent form of the
+					# `matrix_stay_days[:, CNQZH] == 0` probe that recovered $8.88M of
+					# otherwise-unclaimed cost - see
+					# docs/vsa_speed_stay_investigation_2026-09-09.md. Safe: those
+					# entries already have transshipments == 0, so 0 >= 0 holds.
+					if port_call_counts[idx_line, idx_port] == 0:
+						constraints.append(matrix_stay_days[idx_line, idx_port] == 0)
+						continue
+
 					if gross_prod > 0:
 						# Stay_days >= Transshipment_volume / (Productivity * 24)
 						constraints.append(
@@ -1264,6 +1281,11 @@ class ServiceGraph:
 		line_speed_choice_vars: list[typing.Any | None] = []
 		line_buffer_penalty_lb_exprs: list[typing.Any] = []
 		line_buffer_penalty_ub_exprs: list[typing.Any] = []
+		# CHANGE 09/09 (client feedback, VSA port-stay-time experiment): tracked
+		# separately from line_buffer_penalty_*, see the turnon-vsa_stay_time_penalty
+		# block below - lets us see this made-up penalty's size on its own instead
+		# of it disappearing into 'total cost' unlabeled.
+		line_stay_penalty_exprs: list[typing.Any] = [0.0] * n_lines
 		daily_bukering_cost_rates, speed_level0 = vesselpool.get_bukering_costs()  # shape = (rank, speed)
 		KTS_levels = vesselpool.get_speed_levels()
 		n_speed_level = len(KTS_levels)
@@ -1297,12 +1319,40 @@ class ServiceGraph:
 			# Operations like inf - inf produce NaN, which crashes Gurobi.
 			is_distance_invalid = np.isinf(line_distance) or line_distance <= 0
 
-			# Handle both decision variable and array cases
-			if tuneparams.get('turnon-port_operations_constraint', 1) > 0.5:
-				line_port_stay_days = cp.sum(matrix_stay_days[idx_line, :])
+			# Handle both decision variable and array cases.
+			# CHANGE 09/09: sum stay time over this line's own rotation ports only,
+			# not every port in the network. The old `[idx_line, :]` sum let phantom
+			# stay time at un-called ports leak into line_sailing_days below and pull
+			# the implied speed below the published VSA speed. The pin added in the
+			# matrix_stay_days constraint loop above already forces off-rotation
+			# entries to 0; this keeps the formula correct on its own terms too. See
+			# docs/vsa_speed_stay_investigation_2026-09-09.md.
+			line_port_indices = sorted({
+				portgraph.get_unique_index(p) for p in line.tolist_port()
+			})
+			if not line_port_indices:
+				line_port_stay_days = 0.0
+			elif tuneparams.get('turnon-port_operations_constraint', 1) > 0.5:
+				line_port_stay_days = cp.sum(matrix_stay_days[idx_line, line_port_indices])
 			else:
-				line_port_stay_days = np.sum(matrix_stay_days[idx_line, :])
-			line_sailing_days = 7 * (week_vars[idx_line, :] @ week_levels) - line_port_stay_days
+				line_port_stay_days = np.sum(matrix_stay_days[idx_line, line_port_indices])
+			# CHANGE 09/09 (client feedback, VSA speed mismatch): a rotation cycle
+			# splits into sailing + stay + waiting + manoeuvring. This formula used
+			# to subtract only stay, so waiting + manoeuvring fell into "sailing
+			# days" - inflating sailing days and pulling every VSA line's implied
+			# speed (distance / (24 * sailing_days)) 10-27% below the published
+			# figure. Subtract the fixed waiting + manoeuvring time too. Lines with
+			# no proforma profile (e.g. MCTS-created) return 0.0 here, so their
+			# behaviour is unchanged. See
+			# docs/vsa_speed_stay_investigation_2026-09-09.md.
+			line_fixed_nonsail_days = 0.0
+			if hasattr(line, 'get_fixed_nonsail_hours'):
+				line_fixed_nonsail_days = line.get_fixed_nonsail_hours() / 24.0
+			line_sailing_days = (
+				7 * (week_vars[idx_line, :] @ week_levels)
+				- line_port_stay_days
+				- line_fixed_nonsail_days
+			)
 			list_saildays.append(line_sailing_days)
 
 			# 3.5 Schedule Adherence (Tethering) Constraint
@@ -1338,13 +1388,74 @@ class ServiceGraph:
 							# Update cumulative stay for next port's ETB
 							# matrix_stay_days is in days
 							cum_stay_days += matrix_stay_days[idx_line, p_idx] / num_visits
+
+			# CHANGE 09/09 (client feedback, VSA port-stay-time experiment,
+			# EXPERIMENTAL - off unless 'turnon-vsa_stay_time_penalty' is set).
+			# Root cause found while investigating the VSA speed/distance mismatch:
+			# matrix_stay_days only has a floor (must be enough time to load/unload
+			# cargo), nothing pulling it toward the real published stay time - so
+			# the solver was shrinking port stay to that floor and dumping the
+			# difference into "sailing days" instead, which is what made
+			# distance/sailing-days look slower than the published speed (see
+			# schedule_speed_check below). This softly (not hard-) penalizes any
+			# gap between the MILP's chosen stay days and the real schedule, per
+			# port - soft so it can't cause the same infeasibility a hard lock
+			# risked for speed.
+			stay_profile = line.get_stay_days_profile()
+			if (tuneparams.get('turnon-vsa_stay_time_penalty', 0) > 0.5
+					and tuneparams.get('turnon-port_operations_constraint', 1) > 0.5
+					and line.frozen and stay_profile is not None):
+				target_stay_days_by_port: dict[int, float] = {}
+				for k, port in enumerate(line.tolist_port()):
+					p_idx = portgraph.get_unique_index(port)
+					target_stay_days_by_port[p_idx] = target_stay_days_by_port.get(p_idx, 0.0) + stay_profile[k]
+
+				stay_penalty_rate = tuneparams.get('ctrparam-stay_time_penalty_per_day', 500.0)
+				line_stay_penalty_expr = 0.0
+				for p_idx, target_days in target_stay_days_by_port.items():
+					stay_over = cp.Variable(nonneg=True)
+					stay_under = cp.Variable(nonneg=True)
+					constraints.append(
+						matrix_stay_days[idx_line, p_idx] - target_days == stay_over - stay_under
+					)
+					line_stay_penalty_expr += stay_penalty_rate * (stay_over + stay_under)
+				line_stay_penalty_exprs[idx_line] = line_stay_penalty_expr
+				obj_expr += line_stay_penalty_expr
+
+			# CHANGE 09/09 (client feedback, VSA speed mismatch): hold a VSA line's
+			# per-port stay time at the published schedule value. VSA lines are
+			# partner-run - stay time is part of the frozen timetable, not something
+			# CMA optimises. Without this, once the hard speed<->sailing-days link
+			# was dropped (Meixi fix) nothing pinned VSA sailing days, so the solver
+			# picked them arbitrarily and the implied speed drifted 10-27% below the
+			# published figure. This is a >= bound, not an == lock: it stacks with
+			# the operational stay floor (load/unload time) and the higher of the
+			# two wins, so it cannot cause the infeasibility a hard equality risked.
+			# FIX lines are excluded (rank/weeks/speed stay optimisable). Gated by
+			# 'turnon-vsa_stay_time_lock' (default on); 'turnon-vsa_stay_time_penalty'
+			# stays available as a softer alternative.
+			if (tuneparams.get('turnon-vsa_stay_time_lock', 1) > 0.5
+					and tuneparams.get('turnon-port_operations_constraint', 1) > 0.5
+					and line.frozen and line.frozen_rank_weeks and stay_profile is not None):
+				_locked_stay_by_port: dict[int, float] = {}
+				for k, port in enumerate(line.tolist_port()):
+					p_idx = portgraph.get_unique_index(port)
+					_locked_stay_by_port[p_idx] = _locked_stay_by_port.get(p_idx, 0.0) + stay_profile[k]
+				for p_idx, target_days in _locked_stay_by_port.items():
+					constraints.append(matrix_stay_days[idx_line, p_idx] >= target_days)
+
 			buf = 0.5  # Fixed tolerance level
 
-			# Constraints for frozen lines
-			if line.frozen and line.frozen_speed is not None and line.frozen_speed > 0:
-				if not is_distance_invalid:
-					# Fix sailing days based on frozen speed: Sailing Days = Distance / (Speed * 24)
-					constraints.append(line_sailing_days * 24 * line.frozen_speed == line_distance)
+			# CHANGE 27/08 (client feedback, VSA schedule infeasibility follow-up):
+			# used to hard-constrain sailing days from frozen_speed here (Sailing
+			# Days = Distance / (Speed * 24)). Client (Meixi) flagged that published
+			# speeds are nominal/rounded, so this equality fights the line's own
+			# distance/port-time data and can make the solve infeasible. Reason:
+			# treat the published timetable as authoritative and demote this check
+			# to a post-solve validation warning instead (see line_diagnostics'
+			# 'schedule_speed_check' below) - the speed itself is still locked via
+			# the KTS binary below, just not tied to sailing days by a hard equality.
+			vsa_speed_locked = line.frozen and line.frozen_speed is not None and line.frozen_speed > 0
 
 			if tuneparams['turnon-vessel_speed_optimization'] > 1/2:
 				line_speed_choice_vars.append(None)
@@ -1406,7 +1517,7 @@ class ServiceGraph:
 				constraints.append(cp.sum(line_KTS_vars) == 1)
 
 				# Fix speed for frozen lines
-				if line.frozen and line.frozen_speed is not None and line.frozen_speed > 0:
+				if vsa_speed_locked:
 					kts_idx = np.argmin([abs(k - line.frozen_speed) for k in KTS_levels])
 					constraints.append(line_KTS_vars[kts_idx] == 1)
 
@@ -1420,16 +1531,21 @@ class ServiceGraph:
 				constraints.append(aux_W_shipspeed >= line_ship_stack - big_M_nship * (1 - KTS_line_stack))
 
 				if not is_distance_invalid:
-					# Constraint: Optimal Speed * Sailing Days ~= Distance
-					aux_W_speedsaildays = cp.Variable(shape=n_speed_level)
-					constraints.append(24 * aux_W_speedsaildays @ (KTS_levels + speed_step / 2) >= line_distance)
-					constraints.append(24 * aux_W_speedsaildays @ (KTS_levels - speed_step / 2) <= line_distance)
+					# CHANGE 27/08 (client feedback): VSA lines with a locked speed skip
+					# this hard "speed * sailing_days ~= distance" link - see the
+					# vsa_speed_locked comment above for why. Non-frozen (and FIX) lines
+					# still get it, since they need it to pick an optimal speed.
+					if not vsa_speed_locked:
+						# Constraint: Optimal Speed * Sailing Days ~= Distance
+						aux_W_speedsaildays = cp.Variable(shape=n_speed_level)
+						constraints.append(24 * aux_W_speedsaildays @ (KTS_levels + speed_step / 2) >= line_distance)
+						constraints.append(24 * aux_W_speedsaildays @ (KTS_levels - speed_step / 2) <= line_distance)
 
-					for idx_kts in range(n_speed_level):
-						z_kts = line_KTS_vars[idx_kts]
-						constraints.append(aux_W_speedsaildays[idx_kts] <= bigM_saildays * z_kts)
-						constraints.append(aux_W_speedsaildays[idx_kts] >= -bigM_saildays * z_kts)
-						constraints.append(aux_W_speedsaildays[idx_kts] <= line_sailing_days + bigM_saildays * (1 - z_kts))
+						for idx_kts in range(n_speed_level):
+							z_kts = line_KTS_vars[idx_kts]
+							constraints.append(aux_W_speedsaildays[idx_kts] <= bigM_saildays * z_kts)
+							constraints.append(aux_W_speedsaildays[idx_kts] >= -bigM_saildays * z_kts)
+							constraints.append(aux_W_speedsaildays[idx_kts] <= line_sailing_days + bigM_saildays * (1 - z_kts))
 						constraints.append(aux_W_speedsaildays[idx_kts] >= line_sailing_days - bigM_saildays * (1 - z_kts))
 
 					# 5. Buffer Constraint (Wait + Slack)
@@ -1901,6 +2017,29 @@ class ServiceGraph:
 				else:
 					selected_speed = None
 
+				# CHANGE 27/08 (client feedback, VSA schedule infeasibility follow-up):
+				# now that frozen_speed no longer forces sailing_days == distance/speed
+				# as a hard constraint (see vsa_speed_locked above), check it here
+				# instead and report a warning when the published timetable and the
+				# distance/speed calculation disagree by more than a small tolerance.
+				schedule_speed_check = None
+				if (line.frozen and line.frozen_speed is not None and line.frozen_speed > 0
+						and line_sailing_days_val > 0 and math.isfinite(line_distance) and line_distance > 0):
+					implied_speed = line_distance / (24.0 * line_sailing_days_val)
+					mismatch_pct = abs(implied_speed - line.frozen_speed) / line.frozen_speed * 100.0
+					schedule_speed_check = {
+						'published_speed_kts': line.frozen_speed,
+						'implied_speed_kts': implied_speed,
+						'mismatch_pct': mismatch_pct,
+						'flagged': mismatch_pct > 5.0,
+					}
+					if schedule_speed_check['flagged']:
+						print(
+							f"[VSA schedule check] {line.name()}: published speed "
+							f"{line.frozen_speed:.2f}kt vs distance/sailing-days implied "
+							f"speed {implied_speed:.2f}kt ({mismatch_pct:.1f}% mismatch)"
+						)
+
 				if hasattr(matrix_stay_days, 'value'):
 					port_stay_days = _solution_vector(matrix_stay_days[idx_line, :], portgraph.get_number_of_ports())
 				else:
@@ -1955,6 +2094,8 @@ class ServiceGraph:
 					'buffer_penalty_lb': line_buffer_penalty_lb,
 					'buffer_penalty_ub': line_buffer_penalty_ub,
 					'buffer_penalty_cost': line_buffer_penalty_lb + line_buffer_penalty_ub,
+					'schedule_speed_check': schedule_speed_check,
+					'stay_time_penalty_cost': _solution_float(line_stay_penalty_exprs[idx_line], 0.0) or 0.0,
 				})
 
 		# CHANGE 18/08 (client feedback #7 - cargo flow routing not exported): the

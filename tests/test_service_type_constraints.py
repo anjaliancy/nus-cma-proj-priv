@@ -14,7 +14,10 @@ def test_proforma_loader_records_vsa_metadata():
 
 	assert lines['CHN1CNC'].service_type == 'VSA'
 	assert lines['CHN1CNC'].week == 4.0
-	assert lines['CHN1CNC'].frozen_speed is None
+	# CHANGE 27/08 (client feedback): VSA speed is now locked to the published
+	# line-level average speed instead of left free - see data_reader.py.
+	assert lines['CHN1CNC'].frozen_speed is not None
+	assert lines['CHN1CNC'].frozen_speed > 0
 	assert lines['CHN1CNC'].vessel_rank == 8
 
 
