@@ -1,0 +1,490 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MCTS Search Tree</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Spectral:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ground:   #f6f7f7;
+    --surface:  #ffffff;
+    --surface-2:#eef1f1;
+    --ink:      #12232e;
+    --ink-soft: #35474f;
+    --muted:    #63747c;
+    --hair:     #dfe4e3;
+    --accent:   #0a6c8f;
+    --accent-ink:#ffffff;
+    --good:     #1f7a52;
+    --good-soft:#dbeee3;
+    --bad:      #b0472c;
+    --bad-soft: #f2e0d9;
+    --neutral:  #9aa7ab;
+    --shadow:   0 1px 2px rgba(18,35,46,.06), 0 8px 24px rgba(18,35,46,.06);
+  }
+  :root:not([data-theme="light"]) {
+    @media (prefers-color-scheme: dark) {
+      --ground:   #0e181d;
+      --surface:  #15242c;
+      --surface-2:#1c2e37;
+      --ink:      #e9edec;
+      --ink-soft: #c2cccd;
+      --muted:    #8fa0a5;
+      --hair:     #26363e;
+      --accent:   #47b2d6;
+      --accent-ink:#07222c;
+      --good:     #58c58c;
+      --good-soft:#173a2b;
+      --bad:      #e08b6f;
+      --bad-soft: #3a241c;
+      --neutral:  #6b7a80;
+      --shadow:   0 1px 2px rgba(0,0,0,.3), 0 10px 30px rgba(0,0,0,.35);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:   #0e181d;
+    --surface:  #15242c;
+    --surface-2:#1c2e37;
+    --ink:      #e9edec;
+    --ink-soft: #c2cccd;
+    --muted:    #8fa0a5;
+    --hair:     #26363e;
+    --accent:   #47b2d6;
+    --accent-ink:#07222c;
+    --good:     #58c58c;
+    --good-soft:#173a2b;
+    --bad:      #e08b6f;
+    --bad-soft: #3a241c;
+    --neutral:  #6b7a80;
+    --shadow:   0 1px 2px rgba(0,0,0,.3), 0 10px 30px rgba(0,0,0,.35);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    line-height: 1.55;
+  }
+  .wrap { max-width: 1140px; margin: 0 auto; padding: 40px 24px 72px; }
+
+  header.page { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; }
+  h1 {
+    font-family: "Spectral", Georgia, serif;
+    font-weight: 600; font-size: 30px; letter-spacing: .1px;
+    margin: 0 0 8px; text-wrap: balance;
+  }
+  .lede { color: var(--muted); font-size: 14px; max-width: 68ch; margin: 0; }
+  .src {
+    font-family: "IBM Plex Mono", monospace; font-size: 11px; color: var(--muted);
+    margin-top: 10px; letter-spacing: .2px;
+  }
+  .theme-btn {
+    flex: none; font: inherit; font-size: 12px; color: var(--ink-soft);
+    background: var(--surface); border: 1px solid var(--hair); border-radius: 999px;
+    padding: 6px 14px; cursor: pointer;
+  }
+  .theme-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  section { margin-top: 44px; }
+  .eyebrow {
+    display: inline-flex; align-items: baseline; gap: 10px;
+    font-family: "IBM Plex Mono", monospace; font-size: 12px;
+    text-transform: uppercase; letter-spacing: .16em; color: var(--muted);
+  }
+  .eyebrow b { color: var(--accent); font-weight: 600; }
+  h2 {
+    font-family: "Spectral", Georgia, serif; font-weight: 600;
+    font-size: 21px; margin: 8px 0 6px;
+  }
+  .note { color: var(--muted); font-size: 13.5px; margin: 0 0 18px; max-width: 74ch; }
+
+  .panel {
+    background: var(--surface); border: 1px solid var(--hair);
+    border-radius: 14px; box-shadow: var(--shadow); padding: 10px;
+    overflow-x: auto;
+  }
+  .panel svg { display: block; width: 100%; height: auto; min-width: 720px; }
+
+  .controls {
+    display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+    padding: 14px 12px 4px;
+  }
+  .controls label {
+    font-family: "IBM Plex Mono", monospace; font-size: 12px;
+    text-transform: uppercase; letter-spacing: .12em; color: var(--muted);
+  }
+  input[type="range"] { flex: 1; min-width: 220px; accent-color: var(--accent); }
+  .epoch-read {
+    font-family: "IBM Plex Mono", monospace; font-size: 13px; color: var(--ink-soft);
+    font-variant-numeric: tabular-nums; min-width: 74px; text-align: right;
+  }
+  .stats { display: flex; gap: 28px; flex-wrap: wrap; padding: 10px 14px 4px; }
+  .stat .k {
+    font-family: "IBM Plex Mono", monospace; font-size: 20px; font-weight: 600;
+    color: var(--ink); font-variant-numeric: tabular-nums;
+  }
+  .stat .l {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .1em; color: var(--muted);
+  }
+
+  .legend {
+    display: flex; gap: 20px; flex-wrap: wrap; align-items: center;
+    padding: 12px 14px 2px; font-size: 12px; color: var(--muted);
+  }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .sw { width: 12px; height: 12px; border-radius: 50%; flex: none; }
+  .sw.good { background: var(--good); }
+  .sw.bad { background: var(--bad); }
+  .sw.root { background: var(--neutral); }
+  .sw.best { background: transparent; border: 2.5px solid var(--accent); }
+
+  svg text { font-family: "IBM Plex Sans", sans-serif; }
+  .mono { font-family: "IBM Plex Mono", monospace; }
+
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="page">
+    <div>
+      <h1>How the search rebuilt the network</h1>
+      <p class="lede">Full network - 31 service lines, 182 ports, 741 OD demands - 8 candidate networks solved. Baseline $41.17M/week - best $38.67M/week (-6.1%, -$2.50M). Reward = 1 / weekly cost, so lower is better.</p>
+      <p class="src">full_mcts_20260708_203156_nodes.csv</p>
+    </div>
+    <button class="theme-btn" id="theme" type="button">Theme</button>
+  </header>
+
+  <section>
+    <span class="eyebrow"><b>01</b> Search tree</span>
+    <h2>Every branch is one port call MCTS tried</h2>
+    <p class="note">
+      Read left to right: each step stacks one more route edit on the baseline and
+      re-solves the whole network with the MILP. The boxed label on a branch is the
+      port added (<span class="mono">+</span>) or removed (<span class="mono">-</span>),
+      the segment it goes into, and the line it belongs to. Node fill = weekly cost
+      against the baseline (greener cheaper, redder pricier), ring = the best network
+      found, size = how often the search revisited that node.
+    </p>
+    <div class="legend">
+      <span><i class="sw root"></i> baseline</span>
+      <span><i class="sw good"></i> cheaper than baseline</span>
+      <span><i class="sw bad"></i> pricier than baseline</span>
+      <span><i class="sw best"></i> best path</span>
+    </div>
+    <div class="panel"><div id="tree-full"></div></div>
+  </section>
+
+  <section>
+    <span class="eyebrow"><b>02</b> Replay</span>
+    <h2>Watch the tree grow, epoch by epoch</h2>
+    <p class="note">
+      Drag to move through the 58 epochs. The baseline is solved first;
+      the first improving edit lands at epoch 12, the depth-4 winner is first solved
+      at epoch 32, and a second branch off the root is opened at epoch
+      56. Long flat stretches are the search confirming shallow
+      options before committing deeper.
+    </p>
+    <div class="controls">
+      <label for="epoch">Epoch</label>
+      <input type="range" id="epoch" min="1" max="58" value="58">
+      <span class="epoch-read" id="epoch-read">58 / 58</span>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="k" id="s-nodes">-</div><div class="l">nodes solved</div></div>
+      <div class="stat"><div class="k" id="s-best">-</div><div class="l">best cost so far</div></div>
+      <div class="stat"><div class="k" id="s-depth">-</div><div class="l">deepest node</div></div>
+    </div>
+    <div class="panel"><div id="tree-replay"></div></div>
+  </section>
+
+  <section>
+    <span class="eyebrow"><b>03</b> Waterfall</span>
+    <h2>The winning path is not a straight line down</h2>
+    <p class="note">
+      The four edits on the best root-to-leaf path, each as its real marginal change
+      in weekly cost (every intermediate network was actually solved). One edit even
+      costs more on its own - the search keeps it because of what it unlocks two
+      steps later. Net: -$2.50M/week
+      (-6.1%).
+    </p>
+    <div class="panel"><div id="waterfall"></div></div>
+  </section>
+</div>
+
+<script id="data" type="application/json">{"meta":{"source":"full_mcts_20260708_203156_nodes.csv","baseline":41170850.78,"best_cost":38673119.22,"saving":2497731.5600000024,"saving_pct":6.066747498969226,"max_depth":4,"max_visits":26,"max_epoch":58,"n_nodes":8,"best_epoch":32},"nodes":[{"id":"0","parent":"","depth":0,"yslot":2.0,"cost":41170850.78,"dev":0.0,"visits":26,"epoch":1,"on_best":true,"is_root":true,"port":null,"port_name":null,"verb":null,"line_no":null,"line_code":null,"seg":null},{"id":"0.0","parent":"0","depth":1,"yslot":1.0,"cost":38860432.21,"dev":-0.056117824291412426,"visits":24,"epoch":11,"on_best":true,"is_root":false,"port":"JPYOK","port_name":"Yokohama","verb":"Add","line_no":"3","line_code":"BMXCNC","seg":["CNTAO","CNXMN"]},{"id":"0.0.0","parent":"0.0","depth":2,"yslot":1.0,"cost":40608169.21,"dev":-0.013666989127981297,"visits":23,"epoch":19,"on_best":true,"is_root":false,"port":"CNCWN","port_name":"Chiwan","verb":"Add","line_no":"6","line_code":"CP2CNC","seg":["CNSHK","HKHKG"]},{"id":"0.0.0.0","parent":"0.0.0","depth":3,"yslot":1.0,"cost":39106345.49,"dev":-0.05014482943361704,"visits":22,"epoch":26,"on_best":true,"is_root":false,"port":"MYLBU","port_name":"Labuan","verb":"Add","line_no":"29","line_code":"YCXCNC","seg":["SGSIN","MYPKG"]},{"id":"0.0.0.0.0","parent":"0.0.0.0","depth":4,"yslot":0.0,"cost":41297325.98,"dev":0.0030719598357543468,"visits":7,"epoch":28,"on_best":false,"is_root":false,"port":"KRUSN","port_name":"Ulsan","verb":"Add","line_no":"3","line_code":"BMXCNC","seg":["CNSHK","CNNSA"]},{"id":"0.0.0.0.1","parent":"0.0.0.0","depth":4,"yslot":1.0,"cost":44448507.19,"dev":0.07961109250606543,"visits":7,"epoch":29,"on_best":false,"is_root":false,"port":"JPOSA","port_name":"Osaka","verb":"Add","line_no":"7","line_code":"CP3CNC","seg":["CNNSA","PHBTG"]},{"id":"0.0.0.0.2","parent":"0.0.0.0","depth":4,"yslot":2.0,"cost":38673119.22,"dev":-0.060667474989692265,"visits":7,"epoch":32,"on_best":true,"is_root":false,"port":"PHSFS","port_name":"Subic Bay","verb":"Add","line_no":"15","line_code":"JPXSCNC","seg":["JPUKB","SGSIN"]},{"id":"0.1","parent":"0","depth":1,"yslot":3.0,"cost":39607760.46,"dev":-0.03796594654680586,"visits":1,"epoch":58,"on_best":false,"is_root":false,"port":"PHCGY","port_name":"Cagayan de Oro","verb":"Add","line_no":"10","line_code":"CS2CNC","seg":["SGSIN","MYPKG"]}],"best_path":["0","0.0","0.0.0","0.0.0.0","0.0.0.0.2"],"waterfall":[{"label":"+ JPYOK","sub":"#3 BMXCNC","from":41170850.78,"to":38860432.21,"delta":-2310418.5700000003},{"label":"+ CNCWN","sub":"#6 CP2CNC","from":38860432.21,"to":40608169.21,"delta":1747737.0},{"label":"+ MYLBU","sub":"#29 YCXCNC","from":40608169.21,"to":39106345.49,"delta":-1501823.7199999988},{"label":"+ PHSFS","sub":"#15 JPXSCNC","from":39106345.49,"to":38673119.22,"delta":-433226.2700000033}]}</script>
+<script>
+(function () {
+  "use strict";
+  var DATA = JSON.parse(document.getElementById("data").textContent);
+  var NS = "http://www.w3.org/2000/svg";
+
+  function css(v) { return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+  function money(x) { return "$" + (x / 1e6).toFixed(2) + "M"; }
+  function el(tag, attrs, text) {
+    var n = document.createElementNS(NS, tag);
+    for (var k in attrs) n.setAttribute(k, attrs[k]);
+    if (text != null) n.textContent = text;
+    return n;
+  }
+
+  // ---- geometry -----------------------------------------------------------
+  var M = { l: 76, r: 156, t: 58, b: 46 };
+  var W = 1080;
+  var maxDepth = DATA.meta.max_depth;
+  var maxSlot = 0;
+  DATA.nodes.forEach(function (n) { if (n.yslot > maxSlot) maxSlot = n.yslot; });
+  var colW = (W - M.l - M.r) / Math.max(maxDepth, 1);
+  var rowH = 122;
+  var H = M.t + maxSlot * rowH + M.b;
+
+  function px(n) { return M.l + n.depth * colW; }
+  function py(n) { return M.t + n.yslot * rowH; }
+
+  function radius(n) {
+    if (n.is_root) return 22;
+    var f = Math.sqrt(n.visits / Math.max(DATA.meta.max_visits, 1));
+    return 11 + 15 * f;
+  }
+
+  // diverging cost colour around the baseline
+  function costFill(n) {
+    if (n.is_root || n.dev == null) return css("--neutral");
+    var t = Math.max(-1, Math.min(1, n.dev / 0.06));   // +/-6% saturates
+    if (t < 0) return mix(css("--surface-2"), css("--good"), -t);
+    return mix(css("--surface-2"), css("--bad"), t);
+  }
+  function mix(a, b, t) {
+    var pa = hex(a), pb = hex(b);
+    return "rgb(" + Math.round(pa[0] + (pb[0] - pa[0]) * t) + ","
+                  + Math.round(pa[1] + (pb[1] - pa[1]) * t) + ","
+                  + Math.round(pa[2] + (pb[2] - pa[2]) * t) + ")";
+  }
+  function hex(c) {
+    c = c.trim();
+    if (c[0] === "#") {
+      if (c.length === 4) c = "#" + c[1] + c[1] + c[2] + c[2] + c[3] + c[3];
+      return [parseInt(c.substr(1, 2), 16), parseInt(c.substr(3, 2), 16), parseInt(c.substr(5, 2), 16)];
+    }
+    var m = c.match(/[\d.]+/g).map(Number);
+    return [m[0], m[1], m[2]];
+  }
+
+  function nodeById(id) {
+    for (var i = 0; i < DATA.nodes.length; i++) if (DATA.nodes[i].id === id) return DATA.nodes[i];
+    return null;
+  }
+
+  // ---- tree renderer ----------------------------------------------------
+  function renderTree(mount, cutoff) {
+    mount.innerHTML = "";
+    var svg = el("svg", { viewBox: "0 0 " + W + " " + H, role: "img",
+      "aria-label": "MCTS search tree" });
+
+    var visible = DATA.nodes.filter(function (n) { return n.epoch <= cutoff; });
+    var vset = {};
+    visible.forEach(function (n) { vset[n.id] = true; });
+
+    // depth guide lines + labels
+    for (var d = 0; d <= maxDepth; d++) {
+      var x = M.l + d * colW;
+      svg.appendChild(el("line", { x1: x, y1: M.t - 30, x2: x, y2: H - M.b + 8,
+        stroke: css("--hair"), "stroke-width": 1, "stroke-dasharray": "2 5" }));
+      var lab = el("text", { x: x, y: H - M.b + 26, "text-anchor": "middle",
+        "font-size": 11, fill: css("--muted") }, d === 0 ? "baseline" : "edit " + d);
+      lab.setAttribute("letter-spacing", ".08em");
+      svg.appendChild(lab);
+    }
+
+    // links + branch labels
+    visible.forEach(function (n) {
+      if (!n.parent || !vset[n.parent]) return;
+      var p = nodeById(n.parent);
+      var x1 = px(p) + radius(p), y1 = py(p), x2 = px(n) - radius(n), y2 = py(n);
+      var mx = (x1 + x2) / 2;
+      var best = n.on_best && p.on_best;
+      svg.appendChild(el("path", {
+        d: "M" + x1 + " " + y1 + " C " + mx + " " + y1 + ", " + mx + " " + y2 + ", " + x2 + " " + y2,
+        fill: "none", stroke: best ? css("--accent") : css("--hair"),
+        "stroke-width": best ? 3.5 : 1.6 }));
+      branchLabel(svg, n, (x1 + x2) / 2, (y1 + y2) / 2, best);
+    });
+
+    // nodes
+    visible.forEach(function (n) {
+      var g = el("g", {});
+      var r = radius(n);
+      g.appendChild(el("circle", {
+        cx: px(n), cy: py(n), r: r, fill: costFill(n),
+        stroke: n.on_best ? css("--accent") : css("--surface"),
+        "stroke-width": n.on_best ? 3 : 1.5 }));
+      if (n.is_root) {
+        var t = el("text", { x: px(n), y: py(n) + 4, "text-anchor": "middle",
+          "font-size": 10, fill: css("--ink-soft") }, "root");
+        g.appendChild(t);
+      }
+      // cost under the node
+      var c = el("text", { x: px(n), y: py(n) + r + 16, "text-anchor": "middle",
+        "font-size": 11.5, fill: css("--ink-soft") }, n.cost == null ? "infeasible" : money(n.cost));
+      c.setAttribute("font-family", '"IBM Plex Mono", monospace');
+      g.appendChild(c);
+      var title = el("title", {}, (n.is_root ? "Baseline network" :
+        (n.verb + " " + n.port + (n.port_name ? " (" + n.port_name + ")" : "") +
+         "  in " + (n.seg ? n.seg[0] + "->" + n.seg[1] : "?") +
+         "  on line #" + n.line_no + " " + n.line_code)) +
+        "\n" + (n.cost == null ? "infeasible" : money(n.cost)) +
+        " / week   ·   " + n.visits + " visits   ·   first solved epoch " + n.epoch);
+      g.appendChild(title);
+      svg.appendChild(g);
+    });
+
+    mount.appendChild(svg);
+  }
+
+  function branchLabel(svg, n, cx, cy, best) {
+    var main = (n.verb === "Add" ? "+ " : "- ") + (n.port || "?");
+    var sub = (n.seg ? n.seg[0] + "\u2192" + n.seg[1] : "") +
+              (n.line_no ? "  ·  #" + n.line_no + " " + n.line_code : "");
+    var wMain = 10 + main.length * 8.2;
+    var wSub = sub ? 16 + sub.length * 5.6 : 0;
+    var w = Math.max(wMain, wSub);
+    var h = sub ? 34 : 22;
+    var g = el("g", {});
+    g.appendChild(el("rect", {
+      x: cx - w / 2, y: cy - h / 2, width: w, height: h, rx: 6,
+      fill: best ? css("--accent") : css("--surface"),
+      stroke: best ? css("--accent") : css("--hair"), "stroke-width": 1.4 }));
+    var t1 = el("text", { x: cx, y: cy + (sub ? -3 : 4), "text-anchor": "middle",
+      "font-size": 12.5, "font-weight": 600,
+      fill: best ? css("--accent-ink") : css("--ink") }, main);
+    t1.setAttribute("font-family", '"IBM Plex Mono", monospace');
+    g.appendChild(t1);
+    if (sub) {
+      var t2 = el("text", { x: cx, y: cy + 12, "text-anchor": "middle",
+        "font-size": 9.5, fill: best ? css("--accent-ink") : css("--muted") }, sub);
+      t2.setAttribute("font-family", '"IBM Plex Mono", monospace');
+      if (best) t2.setAttribute("opacity", ".85");
+      g.appendChild(t2);
+    }
+    svg.appendChild(g);
+  }
+
+  // ---- replay ---------------------------------------------------------
+  var slider = document.getElementById("epoch");
+  var readOut = document.getElementById("epoch-read");
+  var sNodes = document.getElementById("s-nodes");
+  var sBest = document.getElementById("s-best");
+  var sDepth = document.getElementById("s-depth");
+
+  function updateReplay() {
+    var e = +slider.value;
+    readOut.textContent = e + " / " + DATA.meta.max_epoch;
+    var vis = DATA.nodes.filter(function (n) { return n.epoch <= e; });
+    var solved = vis.filter(function (n) { return n.cost != null; });
+    var best = solved.reduce(function (a, n) { return n.cost < a ? n.cost : a; }, Infinity);
+    var depth = vis.reduce(function (a, n) { return n.depth > a ? n.depth : a; }, 0);
+    sNodes.textContent = vis.length;
+    sBest.textContent = isFinite(best) ? money(best) : "-";
+    sDepth.textContent = "depth " + depth;
+    renderTree(document.getElementById("tree-replay"), e);
+  }
+  slider.addEventListener("input", updateReplay);
+
+  // ---- waterfall ----------------------------------------------------
+  function renderWaterfall() {
+    var mount = document.getElementById("waterfall");
+    mount.innerHTML = "";
+    var steps = DATA.waterfall;
+    var wf = { l: 60, r: 30, t: 30, b: 70 };
+    var ww = 1080, barW = 78, gap = (ww - wf.l - wf.r - barW * (steps.length + 2)) / (steps.length + 1);
+    var vals = [DATA.meta.baseline];
+    steps.forEach(function (s) { vals.push(s.to); });
+    var lo = Math.min.apply(null, vals) * 0.985;
+    var hi = Math.max.apply(null, vals) * 1.005;
+    var wh = 360;
+    function Y(v) { return wf.t + (hi - v) / (hi - lo) * (wh - wf.t - wf.b); }
+
+    var svg = el("svg", { viewBox: "0 0 " + ww + " " + wh, role: "img",
+      "aria-label": "Waterfall of marginal weekly-cost changes" });
+
+    // gridlines
+    for (var i = 0; i <= 4; i++) {
+      var gv = lo + (hi - lo) * i / 4;
+      var gy = Y(gv);
+      svg.appendChild(el("line", { x1: wf.l, y1: gy, x2: ww - wf.r, y2: gy,
+        stroke: css("--hair"), "stroke-width": 1 }));
+      var gl = el("text", { x: wf.l - 8, y: gy + 4, "text-anchor": "end",
+        "font-size": 10, fill: css("--muted") }, "$" + (gv / 1e6).toFixed(1) + "M");
+      gl.setAttribute("font-family", '"IBM Plex Mono", monospace');
+      svg.appendChild(gl);
+    }
+
+    function bar(idx, top, bot, fill, label, sub, strong) {
+      var x = wf.l + gap + idx * (barW + gap);
+      svg.appendChild(el("rect", { x: x, y: Math.min(top, bot), width: barW,
+        height: Math.max(2, Math.abs(bot - top)), rx: 3, fill: fill }));
+      var lx = x + barW / 2;
+      var t1 = el("text", { x: lx, y: wh - wf.b + 22, "text-anchor": "middle",
+        "font-size": 11.5, "font-weight": 600, fill: css("--ink") }, label);
+      t1.setAttribute("font-family", '"IBM Plex Mono", monospace');
+      svg.appendChild(t1);
+      if (sub) {
+        var t2 = el("text", { x: lx, y: wh - wf.b + 38, "text-anchor": "middle",
+          "font-size": 9.5, fill: css("--muted") }, sub);
+        t2.setAttribute("font-family", '"IBM Plex Mono", monospace');
+        svg.appendChild(t2);
+      }
+      var vy = Math.min(top, bot) - 8;
+      var vt = el("text", { x: lx, y: vy, "text-anchor": "middle", "font-size": 10.5,
+        fill: strong ? css("--accent") : css("--ink-soft") }, strong);
+      vt.setAttribute("font-family", '"IBM Plex Mono", monospace');
+      if (strong) svg.appendChild(vt);
+    }
+
+    // baseline (full bar from axis)
+    var base = DATA.meta.baseline;
+    bar(0, Y(base), Y(lo), css("--neutral"), "baseline", "", money(base));
+    var running = base;
+    steps.forEach(function (s, i) {
+      var top = Y(Math.max(running, s.to));
+      var bot = Y(Math.min(running, s.to));
+      var down = s.delta < 0;
+      bar(i + 1, top, bot, down ? css("--good") : css("--bad"), s.label, s.sub,
+        (down ? "-" : "+") + "$" + (Math.abs(s.delta) / 1e6).toFixed(2) + "M");
+      // connector
+      var x0 = wf.l + gap + (i + 1) * (barW + gap);
+      svg.appendChild(el("line", { x1: x0 - gap, y1: Y(running), x2: x0, y2: Y(running),
+        stroke: css("--muted"), "stroke-width": 1, "stroke-dasharray": "3 3" }));
+      running = s.to;
+    });
+    // best (full bar)
+    bar(steps.length + 1, Y(running), Y(lo), css("--accent"), "best", "", money(running));
+
+    mount.appendChild(svg);
+  }
+
+  // ---- theme toggle -------------------------------------------------
+  document.getElementById("theme").addEventListener("click", function () {
+    var cur = document.documentElement.getAttribute("data-theme");
+    var next = cur === "dark" ? "light" : cur === "light" ? "dark"
+      : (matchMedia("(prefers-color-scheme: dark)").matches ? "light" : "dark");
+    document.documentElement.setAttribute("data-theme", next);
+    redraw();
+  });
+
+  function redraw() {
+    renderTree(document.getElementById("tree-full"), DATA.meta.max_epoch);
+    updateReplay();
+    renderWaterfall();
+  }
+  redraw();
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", redraw);
+})();
+</script>
+</body>
+</html>
