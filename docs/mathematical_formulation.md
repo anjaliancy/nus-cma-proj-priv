@@ -401,6 +401,18 @@ $$
 \qquad \sum_{r\le k_p} V_{\ell,r} \;\ge\; z, \qquad z\in\{0,1\}.
 $$
 
+**Singapore transshipment-share rule** — total transshipment volume at SGSIN must be
+at least a fraction $\sigma$ (default 72.5%) of the combined SGSIN/MYPKG/IDJKT volume.
+Off by default (`turnon-singapore_transship_share`); soft mode (default) absorbs any
+shortfall with slack $v\ge0$ penalized at rate $\lambda^{\text{sg}}$
+(`ctrparam-singapore_transship_penalty`), hard mode drops the slack:
+
+$$
+\sum_{\ell} \mathrm{Tr}_{\ell,\text{SGSIN}}
+\;\ge\; \sigma \sum_{p\in\{\text{SGSIN,MYPKG,IDJKT}\}} \sum_{\ell} \mathrm{Tr}_{\ell,p} \;-\; v,
+\qquad Z_{\text{sg}} = \lambda^{\text{sg}} v \text{ added to the objective (soft mode only)}.
+$$
+
 ### II.7 Standard product linearisations (Big-M)
 
 Every bilinear term of a (bounded integer/continuous) variable $u$ and a binary

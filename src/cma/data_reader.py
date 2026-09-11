@@ -700,6 +700,17 @@ def read_cnc_proforma_data(portpool: PortPool, vesselpool: VesselPool,
 			ignore_lb_flag = metadata[line_name]['ignore_buffer_lb']
 			if hasattr(line, 'set_buffer_profile'):
 				line.set_buffer_profile(waiting_times, speeds_to_next, ignore_lb_flag)
+
+			# CHANGE 09/09 (client feedback, VSA speed mismatch): also attach the
+			# per-port manoeuvring time (manin + manout). The MILP's sailing-days
+			# formula subtracts waiting + manoeuvring so they are not counted as
+			# sailing time - see serviceline.get_fixed_nonsail_hours().
+			manoeuvre_times = [
+				d['maneuvering_in'] + d['maneuvering_out']
+				for d in metadata[line_name]['port_details']
+			]
+			if hasattr(line, 'set_manoeuvre_times'):
+				line.set_manoeuvre_times(manoeuvre_times)
 			
 			# Attach schedule-related profile (Anchor EOSP and Leg Durations)
 			# Leg Duration = Wait + ManIn + Stay + ManOut + TimeToNext
@@ -756,12 +767,11 @@ def read_cnc_proforma_data(portpool: PortPool, vesselpool: VesselPool,
 			# it, while pinning the weeks (vessel count) keeps its slot capacity fixed
 			# so CMA cargo can still be routed onto it.
 			#
-			# NOTE (fixed 22/06): we deliberately do NOT lock frozen_speed here. Locking
-			# speed adds a hard "speed * time = distance" equality in the MILP that
-			# conflicts with the model's own distance/port-time data and made the solve
-			# INFEASIBLE. A partner's exact cruising speed doesn't affect slot capacity
-			# (capacity = vessel count * class size, both still locked), so we let the
-			# MILP pick a schedule-feasible speed instead.
+			# NOTE (fixed 22/06, superseded 27/08 - see below): originally we
+			# deliberately did NOT lock frozen_speed here, because locking speed adds
+			# a hard "speed * time = distance" equality in the MILP that conflicts
+			# with the model's own distance/port-time data and made the solve
+			# INFEASIBLE.
 			# CHANGE 20/08 (FIX-LINE FREEZE FIX, client feedback follow-up): 'frozen'
 			# used to be set only for VSA and to mean three things at once (topology,
 			# rank, weeks locked). FIX lines are fully CNC-operated but with a fixed
@@ -774,6 +784,24 @@ def read_cnc_proforma_data(portpool: PortPool, vesselpool: VesselPool,
 				line.frozen_rank_weeks = True
 				if proforma_weeks is not None and proforma_weeks > 0:
 					line.frozen_weeks = float(max(1, round(proforma_weeks)))
+				# CHANGE 27/08 (client feedback, VSA schedule infeasibility follow-up):
+				# now safe to lock speed too - servicegraph.py no longer enforces the
+				# hard "speed * sailing_days = distance" equality for speed-locked
+				# lines (relaxed to a post-solve validation warning instead), so this
+				# no longer risks infeasibility. metadata[line_name]['speed'] is the
+				# sailing-time-weighted average of the normalized per-leg speeds
+				# (already floored at MIN_SERVICE_SPEED).
+				line.frozen_speed = metadata[line_name]['speed']
+
+				# CHANGE 09/09 (client feedback, VSA port-stay-time experiment):
+				# also record each port's real published stay time (days), so
+				# servicegraph.py can softly pull the MILP's stay-days decision
+				# variable toward it instead of leaving it free between calls.
+				# port_details is built above in the same rotation order as
+				# port_ids/line - one entry per port call, so no re-matching needed.
+				line.set_stay_days_profile(
+					[d['stay_time'] / 24.0 for d in metadata[line_name]['port_details']]
+				)
 
 		except Exception as e:
 			# Some ports might not be in portpool, skip those lines

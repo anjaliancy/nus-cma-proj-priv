@@ -5,9 +5,10 @@ code (MILP in `servicegraph.py`, line rules in `serviceline.py`, actions in `rl_
 data handling in `data_reader.py`). Checked 2026-07-05.
 
 **Summary:** almost everything is implemented, including many items the source document
-still lists as "uncompleted". The only genuinely missing constraint is the **Singapore
-≥72.5% transshipment-share** rule. Two items need a decision: the **per-port visit cap
-(code=2 vs document=3)** and whether **"route in/out of APAC"** should be explicit.
+still lists as "uncompleted". The **Singapore ≥72.5% transshipment-share** rule was added
+2026-07-12 (soft by default, hard mode available). Two items need a decision: the
+**per-port visit cap (code=2 vs document=3)** and whether **"route in/out of APAC"**
+should be explicit.
 
 ---
 
@@ -42,7 +43,7 @@ still lists as "uncompleted". The only genuinely missing constraint is the **Sin
 |---|---|---|
 | Cargo transshipped only at select ports | ✅ (doc: "uncompleted") | `ALLOWED_TRANSSHIP_PORT_IDS`, `data_reader.py:18`; used via `filtered_by_transship_capacity` |
 | ≥ 1 day between ETB2 and ETD1 for a transshipment | ✅ (doc: "uncompleted") | modeled in transit time, `servicegraph.py:1470` |
-| **Singapore transshipments ≥ 72.5% of SG/MY/ID transshipments** | ❌ **NOT implemented** | no code anywhere |
+| **Singapore transshipments ≥ 72.5% of SG/MY/ID transshipments** | ✅ | `servicegraph.py::fulfill_demands`, gated by `turnon-singapore_transship_share` (off by default); soft slack penalty or hard constraint via `ctrparam-singapore_transship_mode` |
 
 ## Actions (MCTS)
 
@@ -57,12 +58,9 @@ still lists as "uncompleted". The only genuinely missing constraint is the **Sin
 
 ## Open items / decisions
 
-1. **❌ Singapore ≥ 72.5% transshipment share** — the only genuinely missing constraint;
-   needs to be added (likely a soft/ratio constraint over transshipment flow at SGSIN vs
-   the SG/MY/ID port group).
-2. **⚠️ Per-port visit cap: code = 2, document = 3.** Default `max_line_visit = 2`
+1. **⚠️ Per-port visit cap: code = 2, document = 3.** Default `max_line_visit = 2`
    (`port.py:56`), enforced at `serviceline.py:324`. One-line change if 3 is intended.
-3. **⚠️ "Route cannot come in and out of APAC"** — only *implicitly* satisfied: the loader
+2. **⚠️ "Route cannot come in and out of APAC"** — only *implicitly* satisfied: the loader
    keeps APAC-only ports (`data_reader.py:211`), so no route can leave APAC. No explicit
    constraint exists; decide whether an explicit rule is required.
 
