@@ -109,8 +109,13 @@ action_trace = ' | '.join(
 tree_pct = (root_cost - best_cost) / root_cost * 100
 resolved_pct = (root_cost - resolved_cost) / root_cost * 100
 
+# NOTE: pd.ExcelWriter(written, engine='openpyxl') in default ('w') mode
+# replaces the WHOLE workbook, silently dropping any sheet not re-written
+# below -- caught this dropping 'cargo_flow_routes' while adapting this
+# pattern for scripts/run_scoped_mcts.py. Read every existing sheet first.
 summary_df = pd.read_excel(written, sheet_name='summary')
 metadata_df = pd.read_excel(written, sheet_name='run_metadata')
+cargo_flow_routes_df = pd.read_excel(written, sheet_name='cargo_flow_routes')
 metadata_df.loc[metadata_df['metric'] == 'scenario_note', 'value'] = (
     'MCTS best-network summary: baseline + the 3 MCTS-selected edits below, '
     'diagnostics from a fresh MILP re-solve of this network.'
@@ -135,6 +140,7 @@ metadata_df = pd.concat([metadata_df, extra_rows], ignore_index=True)
 with pd.ExcelWriter(written, engine='openpyxl') as writer:
     summary_df.to_excel(writer, sheet_name='summary', index=False)
     metadata_df.to_excel(writer, sheet_name='run_metadata', index=False)
+    cargo_flow_routes_df.to_excel(writer, sheet_name='cargo_flow_routes', index=False)
 
 # Add the "what changed" sheet: modified line rotations (baseline vs best, diffed)
 # plus a Simulation/Optimisation/Delta cost table by category. Done as a separate
