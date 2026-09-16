@@ -372,14 +372,21 @@ def read_sailing_distance_data(portpool: PortPool) -> np.ndarray:
 	df = pd.read_csv(str(file), low_memory=False)  # read first table
 	df = df.rename(columns=lambda x: x.strip())  # trim titles
 
-	for _, row in df.iterrows():
-		from_port = port_mapping.get(row['Port Departure'], -1)
-		to_port = port_mapping.get(row['Port Arrival'], -1)
-		dist = row['Sailing Distance (Nautical miles)']
-		if from_port >= 0 and to_port >= 0:
-			dist_matrix[from_port, to_port] = dist
-		# else:
-		#     print(row)
+	# CHANGE (efficiency investigation 2026-09-16, see
+	# docs/mcts_efficiency_investigation_2026-09-16.md): this used to be
+	# `for _, row in df.iterrows(): ...`, which profiled at ~44s on its own
+	# (877k+ per-row Series objects) - vectorized here to a bulk map +
+	# boolean-masked assignment. `dist_matrix[from_idx, to_idx] = dists`
+	# still applies row-by-row for any duplicate (from,to) pair in the same
+	# order as the original loop, so the last matching row still wins,
+	# same as before.
+	from_idx = df['Port Departure'].map(port_mapping)
+	to_idx = df['Port Arrival'].map(port_mapping)
+	valid = from_idx.notna() & to_idx.notna()
+	from_idx = from_idx[valid].to_numpy(dtype=int)
+	to_idx = to_idx[valid].to_numpy(dtype=int)
+	dists = df.loc[valid, 'Sailing Distance (Nautical miles)'].to_numpy()
+	dist_matrix[from_idx, to_idx] = dists
 
 	file_cnc = DATA_DIR.joinpath(data_file_sail_distance_cnc)
 	df_cnc = pd.read_excel(file_cnc, sheet_name='Distance Matrix')
