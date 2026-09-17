@@ -11,9 +11,18 @@ network is known to take 2+ hrs just to build the optimisation problem
 (see docs/progress_summary_2026-09-11.md) -- this subset solves the baseline
 in ~17s, so MCTS epochs are actually tractable here.
 
+Resumable search (prof feedback - tree persistence): by default this script
+saves its search tree to --tree-file after every run and reloads it on the
+next run, via MonteCarloTree.commit_one_step()/save_tree()/load_tree() in
+cma.mcts. Each run commits at most one step - the first action on the path
+to the best node found so far - and forgets the sibling branches that lost
+out at that decision point, so a later run can't re-explore them. Pass
+--fresh to ignore any saved tree and start over from the baseline network.
+
 Usage (from repo root, using the project venv):
     .venv\\Scripts\\python.exe scripts\\scoped-run\\run_scoped_mcts.py
     .venv\\Scripts\\python.exe scripts\\scoped-run\\run_scoped_mcts.py --epochs 15 --depth 3
+    .venv\\Scripts\\python.exe scripts\\scoped-run\\run_scoped_mcts.py --fresh
 """
 import sys, os, time, argparse
 
@@ -31,6 +40,12 @@ ap.add_argument("--weight", type=float, default=0.74)
 ap.add_argument("--timelimit", type=int, default=120)
 ap.add_argument("--mipgap", type=float, default=0.10)
 ap.add_argument("--seed", type=int, default=7)
+ap.add_argument("--tree-file", default=None,
+    help="where the search tree is saved/resumed from (default: "
+         "data/output/scoped_mcts_tree.pkl)")
+ap.add_argument("--fresh", action="store_true",
+    help="ignore any saved tree at --tree-file and start a brand new search "
+         "from the baseline network, discarding all previously committed history")
 args = ap.parse_args()
 
 import random
@@ -48,6 +63,8 @@ from cma.output_summary import (export_milp_output_summary, build_modified_lines
 def log(msg=""):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
+tree_file = args.tree_file or os.path.join(ROOT, "data", "output", "scoped_mcts_tree.pkl")
+
 log("Loading data...")
 vesselpool = read_vessel_class_data()
 portpool_main, _ = read_port_data()
@@ -62,11 +79,12 @@ scoped_lines = [
     line for line in all_lines
     if line.service_type in ("VSA", "FIX") or line.name() in wanted_names
 ]
+scoped_line_names = sorted(l.name() for l in scoped_lines)
 log(f"Scoped network: {len(scoped_lines)} of {len(all_lines)} lines "
     f"({sum(1 for l in scoped_lines if l.service_type=='VSA')} VSA, "
     f"{sum(1 for l in scoped_lines if l.service_type=='FIX')} FIX, "
     f"{sum(1 for l in scoped_lines if l.service_type=='OWN')} OWN)")
-log("Lines: " + ", ".join(sorted(l.name() for l in scoped_lines)))
+log("Lines: " + ", ".join(scoped_line_names))
 
 portgraph = PortGraph(portpool_main, dist_matrix, demand_matrix,
                       mat_transit_time=transit_time_matrix, filter_by_demand=False)
@@ -83,18 +101,46 @@ TP = {'turnon-transship_shipclass_restriction': 0, 'turnon-vessel_speed_optimiza
  'turnon-schedule_adherence': 0, 'schedule_buffer_hrs': 120.0, 'solver-MIPGap': args.mipgap,
  'solver-TimeLimit': args.timelimit, 'solver-MIPFocus': 1, 'solver-verbose': False}
 
+# Always solve the true, never-modified scoped baseline - this is the fixed
+# reference the final "changes" sheet diffs against, regardless of whether
+# this run resumes a saved tree that's already several commits deep.
 log("Solving baseline (root) ...")
 t0 = time.time()
 baseline_solution = servicegraph.solve_approximated(
     portgraph, vesselpool, min_cost=True, week_levels=WEEK_LEVELS, tuneparams_2=TP,
 )
-root_cost = servicegraph.total_cost()
+true_baseline_cost = servicegraph.total_cost()
 baseline_service_lines = servicegraph.tolist_serviceLine()
-log(f"Baseline root cost = {root_cost:,.2f}  (solved in {time.time()-t0:.0f}s)")
+log(f"Baseline root cost = {true_baseline_cost:,.2f}  (solved in {time.time()-t0:.0f}s)")
 
-tree = MonteCarloTree(servicegraph=servicegraph, portgraph=portgraph, vesselpool=vesselpool,
-    discount_fac=0.5, valid_weight_proportion=args.weight, max_depth=args.depth, c_param=1e-2,
-    min_cost=True, week_levels=WEEK_LEVELS, milp_tuneparams=TP)
+tree = None
+resumed_from_saved_tree = False
+if not args.fresh and os.path.exists(tree_file):
+    log(f"Found saved tree at {tree_file}, attempting to resume ...")
+    loaded = MonteCarloTree.load_tree(tree_file)
+    loaded_names = sorted(l.name() for l in loaded.root_node.graph.tolist_serviceLine())
+    if loaded_names != scoped_line_names:
+        log("Saved tree's line set doesn't match this run's --extra-lines - "
+            "can't safely resume, starting fresh instead.")
+    else:
+        tree = loaded
+        resumed_from_saved_tree = True
+        prior_commits = tree.committed_action_trace()
+        log(f"Resumed: {len(prior_commits)} step(s) already committed in earlier runs, "
+            f"current root cost = {tree.root_node.graph.total_cost():,.0f}")
+        for i, text in enumerate(prior_commits, 1):
+            log(f"  committed {i}. {' '.join(text.split())}")
+
+if tree is None:
+    if args.fresh:
+        log("Starting fresh search from the baseline network (--fresh).")
+    else:
+        log("No saved tree found - starting fresh search from the baseline network.")
+    tree = MonteCarloTree(servicegraph=servicegraph, portgraph=portgraph, vesselpool=vesselpool,
+        discount_fac=0.5, valid_weight_proportion=args.weight, max_depth=args.depth, c_param=1e-2,
+        min_cost=True, week_levels=WEEK_LEVELS, milp_tuneparams=TP)
+
+root_cost = tree.root_node.graph.total_cost()
 
 log("-" * 70)
 t_start = time.time()
@@ -115,11 +161,25 @@ for ep in range(1, args.epochs + 1):
         log(f"epoch {ep:>3}/{args.epochs} | ERROR: {e!r}")
 
 log("-" * 70)
+committed_this_run = tree.commit_one_step()
+if committed_this_run is not None:
+    log(f"Committed one step this run: {' '.join(tree.committed_action_trace()[-1].split())}")
+    log(f"New root cost = {tree.root_node.graph.total_cost():,.0f} "
+        f"(tree re-rooted here; sibling branches discarded)")
+else:
+    log("No improving action found yet this run - nothing committed, "
+        "tree state saved as-is for the next run.")
+
+tree.save_tree(tree_file)
+log(f"Search tree saved to: {tree_file}")
+
 best = tree.get_best_node()
 best_cost = best.graph.total_cost()
-log(f"FINAL: root={root_cost:,.0f}  best={best_cost:,.0f}  "
-    f"improvement={root_cost-best_cost:,.0f} ({(root_cost-best_cost)/root_cost*100:.2f}%)")
-log("Best-node action trace:")
+log(f"FINAL: current root={tree.root_node.graph.total_cost():,.0f}  best={best_cost:,.0f}  "
+    f"true baseline={true_baseline_cost:,.0f}  "
+    f"total improvement vs. true baseline={true_baseline_cost-best_cost:,.0f} "
+    f"({(true_baseline_cost-best_cost)/true_baseline_cost*100:.2f}%)")
+log("Remaining best-node action trace (beyond the current committed root):")
 action_trace_lines = []
 for i, act in enumerate(best.trace_actions(), 1):
     try:
@@ -150,15 +210,22 @@ import pandas as pd
 # Read every existing sheet first and re-write all of them together.
 cargo_flow_routes_df = pd.read_excel(written, sheet_name='cargo_flow_routes')
 metadata_df = pd.read_excel(written, sheet_name='run_metadata')
+all_committed = tree.committed_action_trace()
 extra_rows = pd.DataFrame([
     {'metric': 'scenario_note', 'value':
         'Scoped MCTS best-network summary (VSA+FIX+named OWN lines, not the full 31-line network).'},
+    {'metric': 'mcts_true_baseline_cost', 'value': true_baseline_cost},
     {'metric': 'mcts_root_cost', 'value': root_cost},
     {'metric': 'mcts_best_cost', 'value': best_cost},
-    {'metric': 'mcts_improvement_pct', 'value': round((root_cost - best_cost) / root_cost * 100, 2)},
+    {'metric': 'mcts_improvement_pct', 'value': round((true_baseline_cost - best_cost) / true_baseline_cost * 100, 2)},
     {'metric': 'mcts_epochs', 'value': args.epochs},
     {'metric': 'mcts_depth', 'value': args.depth},
     {'metric': 'mcts_action_trace', 'value': ' | '.join(action_trace_lines) or '(no changes selected)'},
+    {'metric': 'mcts_tree_file', 'value': tree_file},
+    {'metric': 'mcts_resumed_from_saved_tree', 'value': resumed_from_saved_tree},
+    {'metric': 'mcts_committed_steps_total', 'value': len(all_committed)},
+    {'metric': 'mcts_committed_action_trace', 'value': ' | '.join(
+        ' '.join(text.split()) for text in all_committed) or '(none committed yet)'},
 ])
 metadata_df = metadata_df[metadata_df['metric'] != 'scenario_note']
 metadata_df = pd.concat([metadata_df, extra_rows], ignore_index=True)

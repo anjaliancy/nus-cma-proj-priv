@@ -559,6 +559,13 @@ class MonteCarloTree:
 		self.num_rollout = 0
 		self.min_cost = min_cost
 
+		# CHANGE (prof feedback - tree persistence): actions already committed
+		# by prior calls to `commit_one_step()`, oldest first, as
+		# (action, explanation_str) pairs. Kept here (not just on disk) so a
+		# pickled/reloaded tree still remembers its full history even though
+		# `root_node` itself only ever points at the *current* committed root.
+		self.committed_actions: list[tuple[GraphAction, str]] = []
+
 	def run(self, epochs: int, display: bool=False):
 		"""
 		Input:
@@ -633,6 +640,43 @@ class MonteCarloTree:
 
 	# def is_fully_expand(self):
 	# 	return self.root_node.is_fully_expand(self.portgraph, self.max_depth)
+
+	def commit_one_step(self) -> Optional[GraphAction]:
+		"""Lock in the next single step towards the best network found so far,
+		and forget every sibling branch that isn't on the way to it.
+
+		Finds the best node anywhere in the tree (same node `get_best_node()`
+		would return), takes the *first* action on the path from the current
+		root to it, and re-roots the tree at that one child - so a future
+		`run()` can only ever branch off from the committed step, never
+		reconsider the alternatives that lost out at this decision point.
+
+		Return:
+			- the committed `GraphAction`, or `None` if the current root is
+			  already the best node found (nothing to commit yet - keep
+			  running more epochs first).
+		"""
+		best_node = self.get_best_node()
+		if best_node is self.root_node:
+			return None
+
+		trace = best_node.trace_actions()
+		committed_action = trace[0]
+		step_idx = len(self.committed_actions) + 1
+		explanation = committed_action.explain(self.portgraph, self.root_node.graph, step_idx)
+
+		new_root = self.root_node.children[self.root_node.borns.index(committed_action)]
+		new_root.parent = None
+		self.root_node = new_root
+		self.committed_actions.append((committed_action, explanation))
+		return committed_action
+
+	def committed_action_trace(self) -> list[str]:
+		"""Explanations for every step committed so far, oldest first -
+		survives across `save_tree()`/`load_tree()` even after the nodes for
+		the discarded alternatives (and the original root) are gone.
+		"""
+		return [explanation for _, explanation in self.committed_actions]
 
 ###############################################################################
 # Utils
