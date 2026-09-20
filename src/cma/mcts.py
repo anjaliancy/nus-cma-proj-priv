@@ -389,34 +389,48 @@ class MonteCarloTreeSearchNode:
 		if len(actions) == 0:
 			print("Warning: no valid action in expansion.")
 			return
-		pucb_list = []
 
-		for idx, action in enumerate(actions):
-			if action not in self.borns:
-				# pucb = self.current_state_reward() + c_param * probs[idx] * self.number_of_visits**0.5
-				## for unborns, predict their reward by father
-				senior = self.estimated_senior()
-				assert senior is not None
-				# senior is not None since root is estimated for sure
-				perturb_mean = senior.sum_value / senior.number_of_visits
-				perturb = random.gauss(perturb_mean, c_param)
-				pucb = perturb + c_param * probs[idx] * self.number_of_visits**0.5
-			else: # in borns/children
-				c = self.children[self.borns.index(action)]
-				pucb = c.pucb(c_param)
-			pucb_list.append(pucb)
+		# CHANGE (fix exploration - "untried actions were a lottery, not a
+		# comparison"): previously, an unborn action's score was a random
+		# guess (`random.gauss(perturb_mean, c_param)`, the SAME perturb_mean
+		# shared by every unborn candidate at this call) compared directly
+		# against already-born children's real, solved pucb() values. Since
+		# every unborn candidate got the same base guess, which one "won"
+		# depended only on per-candidate noise, not on c_param's magnitude or
+		# any real signal - confirmed empirically: a ~3.5-million-x change in
+		# c_param produced byte-identical search behaviour. Standard MCTS
+		# practice (UCT) avoids this by trying every untried action for real
+		# at least once before ever comparing options - so do that here: if
+		# any action at this node hasn't been tried, pick one of those
+		# (uniformly at random) and try it for real, instead of guessing.
+		# Only once every action here has a real, solved value do we fall
+		# back to comparing children by their actual pucb().
+		#
+		# CHANGE: a candidate "feasible" action can still fail the stricter
+		# route-shape check inside add_child() (measured: only 39% of 7441
+		# root-level "feasible" actions actually succeed) - add_child()
+		# already blacklists a failing action in self.invalid_actions, but
+		# the first version of this fix picked exactly one untried action
+		# and gave up for the whole epoch if it failed, so an unlucky streak
+		# of failures (very possible at a 61% failure rate) wasted several
+		# epochs doing nothing. Instead, keep trying different untried
+		# actions in this same call until one actually succeeds.
+		untried = [(idx, action) for idx, action in enumerate(actions) if action not in self.borns]
+		random.shuffle(untried)
+		for idx, selected_act in untried:
+			if self.add_child(selected_act, portgraph, probs[idx], max_depth) is not None:
+				return
+		if not self.borns:
+			print("Warning: no valid action in expansion.")
+			return
 
+		pucb_list = [self.children[self.borns.index(action)].pucb(c_param) for action in actions if action in self.borns]
 		selected_act_idx = pucb_list.index(max(pucb_list))
-		selected_act = actions[selected_act_idx]
-
-		if selected_act not in self.borns:
-			self.add_child(selected_act, portgraph, probs[selected_act_idx], max_depth)
-		else:
-			# print('在 expand 的时候找到已出生的孩子节点，递归进行 expand')
-			c = self.children[self.borns.index(selected_act)]
-			c.expand(
-				portgraph, vesselpool, max_depth, c_param, discount_fac,
-				valid_weight_proportion, week_predictor, week_levels, milp_tuneparams)
+		selected_act = [action for action in actions if action in self.borns][selected_act_idx]
+		c = self.children[self.borns.index(selected_act)]
+		c.expand(
+			portgraph, vesselpool, max_depth, c_param, discount_fac,
+			valid_weight_proportion, week_predictor, week_levels, milp_tuneparams)
 
 	def select(self, c_param: float) -> 'MonteCarloTreeSearchNode':
 		"""
